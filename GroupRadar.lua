@@ -119,13 +119,19 @@ GR.defaultConfig = {
 local function Cfg()
     if not MTR.db then return GR.defaultConfig end
     if not MTR.db.groupRadarConfig then
-        MTR.db.groupRadarConfig = MTR.DeepCopy(GR.defaultConfig)
+        if MTR.SetProfilePath then
+            MTR.SetProfilePath("groupRadarConfig", MTR.DeepCopy(GR.defaultConfig))
+        else
+            MTR.db.groupRadarConfig = MTR.DeepCopy(GR.defaultConfig)
+        end
     end
-    local c = MTR.db.groupRadarConfig
+    local c = (MTR.GetProfilePath and MTR.GetProfilePath("groupRadarConfig", GR.defaultConfig)) or MTR.db.groupRadarConfig
     for k, v in pairs(GR.defaultConfig) do
-        if c[k] == nil then c[k] = v end
+        if c[k] == nil then
+            if MTR.SetProfilePath then MTR.SetProfilePath("groupRadarConfig." .. k, v) else c[k] = v end
+        end
     end
-    return c
+    return (MTR.GetProfilePath and MTR.GetProfilePath("groupRadarConfig", c)) or c
 end
 
 -- ============================================================================

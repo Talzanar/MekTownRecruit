@@ -31,6 +31,9 @@ initFrame:SetScript("OnEvent",function(self,event)
         MTR.isGM      = MTR.CheckIsGM()
         MTR.isOfficer = MTR.CheckIsOfficer()
         MTR.dprint("GM:",MTR.isGM,"Officer:",MTR.isOfficer)
+        if MTR.EnsureGuildIdentity then
+            MTR.EnsureGuildIdentity()
+        end
 
         -- Always enable offline member visibility for the whole session.
         SetGuildRosterShowOffline(true)
@@ -76,6 +79,7 @@ end)
 -- ============================================================================
 SLASH_MEKTOWN1="/mek"
 SLASH_MEKTOWN2="/mektown"
+SLASH_MTRID1="/mtrid"
 SlashCmdList["MEKTOWN"]=function(msg)
     if not MTR.initialized then MTR.MPE("Not ready yet.") return end
     local cmd,args=msg:match("^(%S*)%s*(.-)$")
@@ -90,6 +94,7 @@ SlashCmdList["MEKTOWN"]=function(msg)
         print("  /mek add <kw>            - Add keyword")
         print("  /mek list                - List keywords")
         print("  /mek invite on/off       - Guild auto-invite")
+        print("  /mtrid                   - Show current guild name, realm, and guild key")
         print("  /mek dkp award <n> <pts> [reason]")
         print("  /mek dkp deduct <n> <pts> [reason]")
         print("  /mek dkp set <n> <pts>   - GM only")
@@ -136,10 +141,10 @@ SlashCmdList["MEKTOWN"]=function(msg)
         end
 
     elseif cmd=="on" then
-        MTR.db.enabled=true  MTR.MP("|cff00ff00Scanner enabled|r")
+        MTR.SetProfileBoolean("enabled", true)  MTR.MP("|cff00ff00Scanner enabled|r")
 
     elseif cmd=="off" then
-        MTR.db.enabled=false MTR.MP("|cffff4444Scanner disabled|r")
+        MTR.SetProfileBoolean("enabled", false) MTR.MP("|cffff4444Scanner disabled|r")
 
     elseif cmd=="debug" then
         local enabled = not MTR.IsDebugEnabled()
@@ -159,8 +164,8 @@ SlashCmdList["MEKTOWN"]=function(msg)
 
     elseif cmd=="invite" then
         local sub=args:lower()
-        if sub=="on"  then MTR.db.enableGuildInvites=true  MTR.MP("Auto-invite: |cff00ff00ON|r")
-        elseif sub=="off" then MTR.db.enableGuildInvites=false MTR.MP("Auto-invite: |cffff4444OFF|r")
+        if sub=="on"  then MTR.SetGuildInviteEnabled(true)  MTR.MP("Auto-invite: |cff00ff00ON|r")
+        elseif sub=="off" then MTR.SetGuildInviteEnabled(false) MTR.MP("Auto-invite: |cffff4444OFF|r")
         else MTR.MP("/mek invite [on|off]") end
 
     elseif cmd=="dkp" then
@@ -316,4 +321,23 @@ SlashCmdList["MEKTOWN"]=function(msg)
     else
         MTR.MPE("Unknown command - /mek help")
     end
+end
+
+
+SlashCmdList["MTRID"] = function()
+    if not MTR then
+        print("|cffff4040[MekTown]|r Addon not initialized.")
+        return
+    end
+    if GuildRoster then pcall(GuildRoster) end
+    local info
+    if MTR.GetGuildIdentityInfo then
+        info = MTR.GetGuildIdentityInfo()
+    else
+        local realm = (GetRealmName and GetRealmName()) or "UnknownRealm"
+        local guild = (GetGuildInfo and GetGuildInfo("player")) or "LOADING..."
+        info = { guildName = guild, realm = realm, guildKey = tostring(realm) .. "|" .. tostring(guild) }
+    end
+    print("|cff00c0ff[MekTown]|r Guild: |cffffff00" .. tostring(info.guildName or "LOADING...") .. "|r  Realm: |cffffff00" .. tostring(info.realm or "UnknownRealm") .. "|r")
+    print("|cff00c0ff[MekTown]|r Guild Key: |cffaaaaaa" .. tostring(info.guildKey or "Unknown|LOADING...") .. "|r")
 end

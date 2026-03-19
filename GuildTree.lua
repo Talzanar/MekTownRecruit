@@ -29,6 +29,12 @@ if RegisterAddonMessagePrefix then RegisterAddonMessagePrefix(GT_PREFIX) end
 -- STORAGE
 -- ============================================================================
 local function FT()
+    if MTR.GetGuildStore then
+        local gs = MTR.GetGuildStore(true)
+        gs.familyTree = gs.familyTree or {}
+        if MTR.db then MTR.db.familyTree = gs.familyTree end
+        return gs.familyTree
+    end
     if not MTR.db then return nil end
     if not MTR.db.familyTree then MTR.db.familyTree = {} end
     return MTR.db.familyTree
@@ -51,6 +57,7 @@ end
 -- SYNC
 -- ============================================================================
 local function GTBroadcast(msg)
+    if MTR.SendGuildScoped then return MTR.SendGuildScoped(GT_PREFIX, msg) end
     if IsInGuild() then SendAddonMessage(GT_PREFIX, msg, "GUILD") end
 end
 
@@ -77,6 +84,7 @@ local function GTApplySet(charName, mainName)
     if not found then
         ft[mainName].alts[#ft[mainName].alts + 1] = charName
     end
+    if MTR.AppendGuildEvent then MTR.AppendGuildEvent("guildTree", "setAlt", tostring(charName or "") .. "|" .. tostring(mainName or "")) end
 end
 
 local function GTApplyMain(charName)
@@ -90,6 +98,7 @@ local function GTApplyMain(charName)
         end
     end
     ft[charName] = { isMain = true, alts = (prev and prev.alts) or {} }
+    if MTR.AppendGuildEvent then MTR.AppendGuildEvent("guildTree", "setMain", tostring(charName or "")) end
 end
 
 local function GTApplyDel(charName)
@@ -113,6 +122,7 @@ local function GTApplyDel(charName)
         end
     end
     ft[charName] = nil
+    if MTR.AppendGuildEvent then MTR.AppendGuildEvent("guildTree", "delete", tostring(charName or "")) end
 end
 
 local function GTEncodeFull()
@@ -135,39 +145,80 @@ end
 --   "MainName ALT"       — suffix format used in public notes
 --   "MainName alt"       — lowercase suffix variant
 -- ============================================================================
+local function ParseMainFromNote(note, shortName)
+    if type(note) ~= "string" then return nil end
+    note = (note:match("^%s*(.-)%s*$") or "")
+    if note == "" then return nil end
+
+    local lower = string.lower(note)
+    local mainName
+    if lower:find("^alt%s*[:%-]") then
+        mainName = note:match("^[Aa][Ll][Tt]%s*[:%-]%s*(.+)$")
+    elseif lower:find("^alt%s+of%s+") then
+        mainName = note:match("^[Aa][Ll][Tt]%s+[Oo][Ff]%s+(.+)$")
+    elseif lower:find("^main%s*[:%-]") then
+        mainName = note:match("^[Mm][Aa][Ii][Nn]%s*[:%-]%s*(.+)$")
+    elseif lower:find("%s+alt%s*$") then
+        mainName = note:gsub("%s+[Aa][Ll][Tt]%s*$", "")
+    elseif lower:find("%s*%-%s*alt%s*$") then
+        mainName = note:gsub("%s*%-%s*[Aa][Ll][Tt]%s*$", "")
+    elseif lower:find("%s*>%s*alt%s*$") then
+        mainName = note:gsub("%s*>%s*[Aa][Ll][Tt]%s*$", "")
+    end
+
+    if not mainName then return nil end
+    mainName = (mainName:match("^%s*(.-)%s*$") or "")
+    if mainName == "" then return nil end
+    local first = string.sub(mainName, 1, 1)
+    local last = string.sub(mainName, -1)
+    if (first == '"' and last == '"') or (first == "'" and last == "'") then
+        mainName = string.sub(mainName, 2, -2)
+    end
+    mainName = (mainName:match("^%s*(.-)%s*$") or "")
+    if mainName == "" or mainName == shortName then return nil end
+    return mainName
+end
+
+local function EnsureGuildMemberEntries()
+    local ft = FT()
+    if not ft then return 0 end
+    local added = 0
+    local num = GetNumGuildMembers() or 0
+    for i = 1, num do
+        local name = GetGuildRosterInfo(i)
+        if name then
+            local shortName = name:match("^([^%-]+)") or name
+            if not ft[shortName] then
+                ft[shortName] = { isMain = true, alts = {} }
+                added = added + 1
+            end
+        end
+    end
+    return added
+end
+
 local function ScanGuildNotes()
     if not MTR.initialized or not MTR.db then return end
-    local num = GetNumGuildMembers()
+    local num = GetNumGuildMembers() or 0
     if num == 0 then return end
+
+    local ft = FT()
+    if not ft then return end
+
+    -- Ensure every visible guild member appears as a standalone main unless linked as an alt.
+    EnsureGuildMemberEntries()
+
     local count = 0
     for i = 1, num do
-        -- fields: name,rankName,rankIndex,level,classDisplay,zone,publicNote,officerNote,...
         local name, _, _, _, _, _, publicNote, officerNote = GetGuildRosterInfo(i)
         if name then
-            -- Strip realm suffix if present
             local shortName = name:match("^([^%-]+)") or name
-            -- Check both notes for any supported alt-link pattern
-            for _, note in ipairs({ officerNote or "", publicNote or "" }) do
-                if note ~= "" then
-                    local mn = nil
-
-                    -- Pattern 1: "Alt:MainName" or "alt:MainName" (colon-prefix)
-                    mn = note:match("[Aa][Ll][Tt]:%s*(.+)$")
-                    if mn then mn = mn:match("^%s*(.-)%s*$") end
-
-                    -- Pattern 2: "MainName ALT" or "MainName alt" (space-suffix)
-                    -- The main name is everything before the trailing ALT word
-                    if not mn or mn == "" then
-                        mn = note:match("^%s*(.-)%s+[Aa][Ll][Tt]%s*$")
-                        if mn then mn = mn:match("^%s*(.-)%s*$") end
-                    end
-
-                    if mn and mn ~= "" and mn ~= shortName then
-                        GTApplySet(shortName, mn)
-                        count = count + 1
-                        break
-                    end
-                end
+            local mn = ParseMainFromNote(officerNote, shortName) or ParseMainFromNote(publicNote, shortName)
+            if mn and mn ~= shortName then
+                GTApplySet(shortName, mn)
+                count = count + 1
+            elseif not ft[shortName] then
+                ft[shortName] = { isMain = true, alts = {} }
             end
         end
     end
@@ -182,10 +233,11 @@ gtMsgFrame:RegisterEvent("CHAT_MSG_ADDON")
 gtMsgFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= GT_PREFIX then return end
     if not MTR.initialized or not MTR.db then return end
-    local senderName = (sender or ""):match("^([^%-]+)") or sender or ""
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, true)) or message, ((sender or ""):match("^([^%-]+)") or sender or "")
+    if not unpacked then return end
     if senderName == MTR.playerName then return end
 
-    local cmd, payload = message:match("^GT:(%a+):?(.*)$")
+    local cmd, payload = unpacked:match("^GT:(%a+):?(.*)$")
     if not cmd then return end
 
     if cmd == "SET" then
@@ -296,300 +348,483 @@ end
 -- ============================================================================
 -- BUILD GUILD TREE TAB
 -- ============================================================================
+
+local _gtPopupInstalled = false
+local function InstallGuildTreePopupMenu()
+    if _gtPopupInstalled then return end
+    _gtPopupInstalled = true
+    if not UnitPopupButtons or not UnitPopupMenus then return end
+
+    UnitPopupButtons["MTR_SET_MAIN"] = { text = "MekTown: Set as Main", dist = 0 }
+    UnitPopupButtons["MTR_SET_ALT"]  = { text = "MekTown: Set as Alt", dist = 0 }
+
+    local menus = { "SELF", "PLAYER", "FRIEND", "GUILD", "PARTY", "RAID_PLAYER" }
+    for _, menu in ipairs(menus) do
+        if UnitPopupMenus[menu] then
+            local foundMain, foundAlt = false, false
+            for _, v in ipairs(UnitPopupMenus[menu]) do
+                if v == "MTR_SET_MAIN" then foundMain = true end
+                if v == "MTR_SET_ALT" then foundAlt = true end
+            end
+            if not foundMain then table.insert(UnitPopupMenus[menu], 1, "MTR_SET_MAIN") end
+            if not foundAlt then table.insert(UnitPopupMenus[menu], 2, "MTR_SET_ALT") end
+        end
+    end
+
+    StaticPopupDialogs["MEKTOWN_GT_SET_ALT"] = StaticPopupDialogs["MEKTOWN_GT_SET_ALT"] or {
+        text = "Set %s as alt of:",
+        button1 = "Set Alt",
+        button2 = "Cancel",
+        hasEditBox = true,
+        maxLetters = 64,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        OnShow = function(self)
+            if self.editBox then
+                self.editBox:SetText("")
+                self.editBox:SetFocus()
+            end
+        end,
+        OnAccept = function(self)
+            local charName = self.data
+            local mainName = self.editBox and self.editBox:GetText() or ""
+            mainName = (mainName or ""):match("^%s*(.-)%s*$") or ""
+            if charName and mainName ~= "" and MTR.GTSetAlt then
+                MTR.GTSetAlt(charName, mainName)
+            end
+        end,
+        EditBoxOnEnterPressed = function(self)
+            local parent = self:GetParent()
+            if parent and parent.button1 then parent.button1:Click() end
+        end,
+    }
+
+    hooksecurefunc("UnitPopup_OnClick", function(self)
+        if not self or not self.value then return end
+        if self.value ~= "MTR_SET_MAIN" and self.value ~= "MTR_SET_ALT" then return end
+        if not (MTR.isOfficer or MTR.isGM) then
+            if MTR.MPE then MTR.MPE("Officers only.") end
+            return
+        end
+        local unit = self.unit
+        if (not unit) and UIDROPDOWNMENU_INIT_MENU then unit = UIDROPDOWNMENU_INIT_MENU.unit end
+        local name = unit and UnitName(unit)
+        if not name or name == "" then return end
+        name = name:match("^([^%-]+)") or name
+        if self.value == "MTR_SET_MAIN" then
+            MTR.GTSetMain(name)
+        else
+            StaticPopup_Show("MEKTOWN_GT_SET_ALT", name, nil, name)
+        end
+    end)
+end
+
 function MTR.BuildGuildTreeTab(t)
     if t._gtBuilt then return end
     t._gtBuilt = true
+    InstallGuildTreePopupMenu()
+
     local canManage = (MTR.isOfficer or MTR.isGM)
-    local treeTopY = -160
+    t._gtExpandedMains = t._gtExpandedMains or {}
+    t._gtRankSelected = t._gtRankSelected or {}
+    t._gtMultiRank = true
+    t._gtSearch = ""
 
-    -- ── Description ──────────────────────────────────────────────────────
-    local desc = t:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    desc:SetPoint("TOPLEFT",  t, "TOPLEFT",  10, -8)
-    desc:SetPoint("TOPRIGHT", t, "TOPRIGHT", -10, -8)
-    desc:SetWordWrap(true) desc:SetJustifyH("LEFT")
+    local function MakeLabel(parent, text, font, x, y, w)
+        local fs = parent:CreateFontString(nil, "OVERLAY", font or "GameFontNormal")
+        fs:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+        if w then fs:SetWidth(w) fs:SetJustifyH("LEFT") end
+        fs:SetText(text or "")
+        return fs
+    end
+
+    local function SetCheckLabel(cb, txt)
+        if cb.text then cb.text:SetText(txt)
+        elseif cb.Text then cb.Text:SetText(txt)
+        elseif cb._label then cb._label:SetText(txt)
+        else
+            local lbl = cb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            lbl:SetPoint("LEFT", cb, "RIGHT", 2, 1)
+            lbl:SetText(txt)
+            cb._label = lbl
+        end
+    end
+
+    MakeLabel(t, "|cffd4af37Guild Tree|r", "GameFontNormalLarge", 10, -10, 900)
+    MakeLabel(t,
+        canManage and "Scalable rank-filtered guild tree with compact main/alt nesting. Officers can scan notes, link mains/alts, and use right-click profile menu actions."
+                  or "Scalable rank-filtered guild tree with compact main/alt nesting. Members can browse the full tree in a readable single-column view.",
+        "GameFontNormalSmall", 10, -34, 980)
+
+    local topY = -60
     if canManage then
-        desc:SetText(
-            "|cffaaaaaa" ..
-            "All guild members appear below. " ..
-            "Use the form to link alts to their main. " ..
-            "Characters with officer notes containing 'Alt:MainName' are linked automatically. " ..
-            "Changes sync to all online officers instantly." ..
-            "|r")
-
-        -- ── Input form ───────────────────────────────────────────────────────
-        local sep1 = t:CreateTexture(nil, "ARTWORK")
-        sep1:SetColorTexture(0.3, 0.3, 0.5, 0.5) sep1:SetHeight(1)
-        sep1:SetPoint("TOPLEFT",  t, "TOPLEFT",  0, -42)
-        sep1:SetPoint("TOPRIGHT", t, "TOPRIGHT", 0, -42)
-
-        local formHdr = t:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        formHdr:SetPoint("TOPLEFT", t, "TOPLEFT", 10, -52)
-        formHdr:SetText("|cffd4af37Link Characters|r")
-
-        local charLbl = t:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        charLbl:SetPoint("TOPLEFT", t, "TOPLEFT", 10, -70)
-        charLbl:SetText("Character:")
-
+        MakeLabel(t, "Character:", "GameFontNormal", 10, topY, 70)
         local charEB = CreateFrame("EditBox", "MekGTCharEB", t, "InputBoxTemplate")
-        charEB:SetSize(180, 20) charEB:SetAutoFocus(false)
-        charEB:SetPoint("TOPLEFT", t, "TOPLEFT", 80, -66)
+        charEB:SetSize(140, 20) charEB:SetAutoFocus(false)
+        charEB:SetPoint("TOPLEFT", t, "TOPLEFT", 76, topY + 4)
 
-        local mainLbl = t:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        mainLbl:SetPoint("TOPLEFT", t, "TOPLEFT", 280, -70)
-        mainLbl:SetText("Main:")
-
+        MakeLabel(t, "Main:", "GameFontNormal", 228, topY, 40)
         local mainEB = CreateFrame("EditBox", "MekGTMainEB", t, "InputBoxTemplate")
-        mainEB:SetSize(180, 20) mainEB:SetAutoFocus(false)
-        mainEB:SetPoint("TOPLEFT", t, "TOPLEFT", 315, -66)
+        mainEB:SetSize(140, 20) mainEB:SetAutoFocus(false)
+        mainEB:SetPoint("TOPLEFT", t, "TOPLEFT", 266, topY + 4)
 
         local setAltBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
-        setAltBtn:SetSize(100, 24) setAltBtn:SetPoint("TOPLEFT", t, "TOPLEFT", 10, -96)
-        setAltBtn:SetText("Set as Alt")
+        setAltBtn:SetSize(84, 22) setAltBtn:SetPoint("TOPLEFT", t, "TOPLEFT", 422, topY + 2)
+        setAltBtn:SetText("Set Alt")
         setAltBtn:SetScript("OnClick", function()
-            local cn = charEB:GetText():match("^%s*(.-)%s*$")
-            local mn = mainEB:GetText():match("^%s*(.-)%s*$")
-            if cn == "" or mn == "" then MTR.MPE("Enter both Character and Main name.") return end
+            local cn = (charEB:GetText() or ""):match("^%s*(.-)%s*$")
+            local mn = (mainEB:GetText() or ""):match("^%s*(.-)%s*$")
+            if cn == "" or mn == "" then if MTR.MPE then MTR.MPE("Enter both Character and Main.") end return end
             MTR.GTSetAlt(cn, mn)
-            charEB:SetText("") mainEB:SetText("")
         end)
 
         local setMainBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
-        setMainBtn:SetSize(110, 24) setMainBtn:SetPoint("LEFT", setAltBtn, "RIGHT", 6, 0)
-        setMainBtn:SetText("Set as Main")
+        setMainBtn:SetSize(84, 22) setMainBtn:SetPoint("LEFT", setAltBtn, "RIGHT", 6, 0)
+        setMainBtn:SetText("Set Main")
         setMainBtn:SetScript("OnClick", function()
-            local cn = charEB:GetText():match("^%s*(.-)%s*$")
-            if cn == "" then MTR.MPE("Enter the Character name.") return end
+            local cn = (charEB:GetText() or ""):match("^%s*(.-)%s*$")
+            if cn == "" then if MTR.MPE then MTR.MPE("Enter a Character.") end return end
             MTR.GTSetMain(cn)
-            charEB:SetText("") mainEB:SetText("")
         end)
 
-        local delBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
-        delBtn:SetSize(80, 24) delBtn:SetPoint("LEFT", setMainBtn, "RIGHT", 6, 0)
-        delBtn:SetText("|cffff4444Unlink|r")
-        delBtn:SetScript("OnClick", function()
-            local cn = charEB:GetText():match("^%s*(.-)%s*$")
-            if cn == "" then MTR.MPE("Enter the Character name.") return end
+        local unlinkBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
+        unlinkBtn:SetSize(72, 22) unlinkBtn:SetPoint("LEFT", setMainBtn, "RIGHT", 6, 0)
+        unlinkBtn:SetText("Unlink")
+        unlinkBtn:SetScript("OnClick", function()
+            local cn = (charEB:GetText() or ""):match("^%s*(.-)%s*$")
+            if cn == "" then if MTR.MPE then MTR.MPE("Enter a Character.") end return end
             MTR.GTRemove(cn)
-            charEB:SetText("") mainEB:SetText("")
         end)
 
         local scanBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
-        scanBtn:SetSize(140, 24) scanBtn:SetPoint("LEFT", delBtn, "RIGHT", 14, 0)
-        scanBtn:SetText("Scan Guild Notes")
+        scanBtn:SetSize(104, 22) scanBtn:SetPoint("LEFT", unlinkBtn, "RIGHT", 10, 0)
+        scanBtn:SetText("Scan Notes")
         scanBtn:SetScript("OnClick", function()
             GuildRoster()
-            MTR.After(1.5, function()
+            local function doScan()
                 local count = ScanGuildNotes() or 0
-                MTR.MP("Guild note scan complete — " .. count .. " alt link(s) found.")
                 if MTR.RefreshGuildTree then MTR.RefreshGuildTree() end
-            end)
+                if MTR.MP then MTR.MP("Guild note scan complete — " .. count .. " link(s) found.") end
+            end
+            MTR.After(0.5, doScan)
+            MTR.After(1.5, doScan)
         end)
-
-        treeTopY = -160
-    else
-        desc:SetText(
-            "|cffaaaaaa" ..
-            "All guild members appear below. Regular members can view the full guild tree, but officer note editing and alt-link management stay officer-only." ..
-            "|r")
-        treeTopY = -72
+        topY = -92
     end
 
-    -- ── Tree display ─────────────────────────────────────────────────────
-    local sep2 = t:CreateTexture(nil, "ARTWORK")
-    sep2:SetColorTexture(0.3, 0.3, 0.5, 0.5) sep2:SetHeight(1)
-    sep2:SetPoint("TOPLEFT",  t, "TOPLEFT",  0, treeTopY + 30)
-    sep2:SetPoint("TOPRIGHT", t, "TOPRIGHT", 0, treeTopY + 30)
+    local searchEB = CreateFrame("EditBox", nil, t, "InputBoxTemplate")
+    searchEB:SetSize(170, 20) searchEB:SetAutoFocus(false)
+    searchEB:SetPoint("TOPLEFT", t, "TOPLEFT", 10, topY)
+    searchEB:SetText("")
+    MakeLabel(t, "Search", "GameFontNormalSmall", 14, topY + 16, 80)
 
-    local treeHdr = t:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    treeHdr:SetPoint("TOPLEFT", t, "TOPLEFT", 10, treeTopY + 20)
-    treeHdr:SetText("|cffd4af37Guild Family Tree|r")
+    local multiCK = CreateFrame("CheckButton", nil, t, "UICheckButtonTemplate")
+    multiCK:SetPoint("TOPLEFT", t, "TOPLEFT", 192, topY + 2)
+    multiCK:SetChecked(true)
+    SetCheckLabel(multiCK, "Multi-rank")
+
+    local compactCK = CreateFrame("CheckButton", nil, t, "UICheckButtonTemplate")
+    compactCK:SetPoint("TOPLEFT", t, "TOPLEFT", 306, topY + 2)
+    compactCK:SetChecked(true)
+    SetCheckLabel(compactCK, "Compact")
+    t._gtCompact = true
+
+    local expandBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
+    expandBtn:SetSize(86, 22)
+    expandBtn:SetPoint("TOPLEFT", t, "TOPLEFT", 420, topY)
+    expandBtn:SetText("Expand All")
+
+    local collapseBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
+    collapseBtn:SetSize(90, 22)
+    collapseBtn:SetPoint("LEFT", expandBtn, "RIGHT", 6, 0)
+    collapseBtn:SetText("Collapse All")
 
     local refreshBtn = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
-    refreshBtn:SetSize(80, 22)
-    refreshBtn:SetPoint("TOPRIGHT", t, "TOPRIGHT", 0, treeTopY + 24)
+    refreshBtn:SetSize(76, 22)
+    refreshBtn:SetPoint("TOPRIGHT", t, "TOPRIGHT", -8, topY)
     refreshBtn:SetText("Refresh")
 
-    -- Status label (shows counts / last scan info)
-    local statusLbl = t:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    statusLbl:SetPoint("RIGHT", refreshBtn, "LEFT", -8, 0)
-    statusLbl:SetText("")
+    local statusLbl = MakeLabel(t, "", "GameFontNormalSmall", 640, topY + 2, 180)
     t._gtStatusLbl = statusLbl
 
-    -- Scroll frame
+    local sidebar = CreateFrame("Frame", nil, t)
+    sidebar:SetWidth(132)
+    sidebar:SetPoint("TOPLEFT", t, "TOPLEFT", 10, topY - 32)
+    sidebar:SetPoint("BOTTOMLEFT", t, "BOTTOMLEFT", 10, 10)
+
+    local sidebarBg = sidebar:CreateTexture(nil, "BACKGROUND")
+    sidebarBg:SetAllPoints(sidebar)
+    sidebarBg:SetTexture("Interface\\Buttons\\WHITE8x8")
+    sidebarBg:SetVertexColor(0.05, 0.05, 0.07, 0.55)
+    MakeLabel(sidebar, "Ranks", "GameFontNormal", 8, -8, 100)
+
+    local rankButtons = {}
+
     local sf = CreateFrame("ScrollFrame", nil, t, "UIPanelScrollFrameTemplate")
-    sf:SetPoint("TOPLEFT",     t, "TOPLEFT",   8, treeTopY)
-    sf:SetPoint("BOTTOMRIGHT", t, "BOTTOMRIGHT", -28, 8)
+    sf:SetPoint("TOPLEFT", t, "TOPLEFT", 146, topY - 32)
+    sf:SetPoint("BOTTOMRIGHT", t, "BOTTOMRIGHT", -28, 10)
     local content = CreateFrame("Frame", nil, sf)
-    content:SetWidth(sf:GetWidth() or 580)
-    content:SetHeight(800)
+    content:SetWidth(780)
+    content:SetHeight(520)
     sf:SetScrollChild(content)
     t._treeContent = content
 
-    -- ── Render function ──────────────────────────────────────────────────
-    local LINE_H = 16
+    local rows = {}
+    local function acquireRow(i)
+        if rows[i] then return rows[i] end
+        local row = CreateFrame("Button", nil, content)
+        row:SetHeight(16)
+        row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+        row:SetPoint("RIGHT", content, "RIGHT", -4, 0)
+        row.bg = row:CreateTexture(nil, "BACKGROUND")
+        row.bg:SetAllPoints(row)
+        row.bg:SetTexture("Interface\\Buttons\\WHITE8x8")
+        row.bg:SetVertexColor(0, 0, 0, 0)
+        row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.label:SetPoint("LEFT", row, "LEFT", 4, 0)
+        row.label:SetJustifyH("LEFT")
+        row.label:SetWidth(720)
+        row.meta = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        row.meta:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+        row.meta:SetJustifyH("RIGHT")
+        rows[i] = row
+        return row
+    end
 
     local CLASS_COLOR = {
-        WARRIOR = "ffc79c6e", PALADIN = "fff58cba", HUNTER  = "ffabd473",
-        ROGUE   = "fffff569", PRIEST  = "ffffffff", DEATHKNIGHT = "ffc41f3b",
-        SHAMAN  = "ff0070de", MAGE    = "ff69ccf0", WARLOCK = "ff9482c9",
-        DRUID   = "ffff7d0a",
+        WARRIOR = "ffc79c6e", PALADIN = "fff58cba", HUNTER = "ffabd473", ROGUE = "fffff569",
+        PRIEST = "ffffffff", DEATHKNIGHT = "ffc41f3b", SHAMAN = "ff0070de", MAGE = "ff69ccf0",
+        WARLOCK = "ff9482c9", DRUID = "ffff7d0a",
     }
     local function CC(class)
         return "|c" .. (CLASS_COLOR[(class or ""):upper()] or "ffffffff")
     end
 
-    -- Pool of FontStrings reused across renders
-    if not content._pool then content._pool = {} end
-
-    local function GetLine(idx)
-        if not content._pool[idx] then
-            content._pool[idx] = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        end
-        return content._pool[idx]
-    end
-
-    local function HideFrom(n)
-        for i = n, #content._pool do
-            if content._pool[i] then content._pool[i]:Hide() end
-        end
-    end
-
-    local function RenderTree()
-        local ft = FT()
-        if not ft then HideFrom(1) return end
-
-        -- Gather live roster info: field order confirmed as
-        -- name(1) rankName(2) rankIndex(3) level(4) classDisplay(5) zone(6)
-        -- publicNote(7) officerNote(8) online(9) status(10) classFileName(11)
-        local roster = {}
-        local num = GetNumGuildMembers()
+    local function buildTreeData()
+        local roster, ranks = {}, {}
+        local num = GetNumGuildMembers() or 0
         for i = 1, num do
-            local name, rankName, rankIndex, level, _, _, _, _, online, _, classFileName = GetGuildRosterInfo(i)
+            local name, rankName, rankIndex, level, _, _, publicNote, officerNote, online, _, classFileName = GetGuildRosterInfo(i)
             if name then
-                -- strip realm suffix if present
                 local shortName = name:match("^([^%-]+)") or name
                 roster[shortName] = {
-                    rankName  = rankName  or "Unknown",
+                    name = shortName,
+                    rankName = rankName or "Unknown",
                     rankIndex = rankIndex or 99,
-                    level     = level     or 0,
-                    class     = classFileName or "WARRIOR",
-                    online    = online    or false,
-                    fullName  = name,
+                    level = level or 0,
+                    class = classFileName or "WARRIOR",
+                    online = online and true or false,
+                    publicNote = publicNote or "",
+                    officerNote = officerNote or "",
                 }
             end
         end
-
-        -- Collect all mains + unlinked guild members
-        local seen = {}
-        local uniqueMains = {}
-
-        -- 1. Explicitly registered mains
-        for name, entry in pairs(ft) do
-            if entry.isMain and not seen[name] then
-                seen[name] = true
-                uniqueMains[#uniqueMains + 1] = name
+        local mainMap = {}
+        for name, info in pairs(roster) do
+            local main = MTR.GTGetMain(name) or name
+            if not roster[main] then main = name end
+            if not mainMap[main] then
+                local owner = roster[main] or info
+                mainMap[main] = { info = owner, alts = {}, rankIndex = owner.rankIndex or 99, rankName = owner.rankName or "Unknown" }
             end
+            if name ~= main then table.insert(mainMap[main].alts, info) end
         end
-
-        -- 2. Guild members not in ft at all → show as unlinked
-        for name in pairs(roster) do
-            if not seen[name] and not ft[name] then
-                seen[name] = true
-                uniqueMains[#uniqueMains + 1] = name
+        for mainName, node in pairs(mainMap) do
+            local key = tostring(node.rankIndex) .. "|" .. node.rankName
+            if not ranks[key] then
+                ranks[key] = { rankIndex = node.rankIndex, rankName = node.rankName, mains = {} }
             end
+            table.insert(ranks[key].mains, { name = mainName, info = node.info, alts = node.alts })
         end
-
-        -- Sort by rankIndex then name
-        table.sort(uniqueMains, function(a, b)
-            local ra = roster[a] and roster[a].rankIndex or 99
-            local rb = roster[b] and roster[b].rankIndex or 99
-            if ra ~= rb then return ra < rb end
-            return a < b
+        local ordered = {}
+        for _, rank in pairs(ranks) do
+            table.sort(rank.mains, function(a, b)
+                local ao, bo = a.info.online and 1 or 0, b.info.online and 1 or 0
+                if ao ~= bo then return ao > bo end
+                return a.name:lower() < b.name:lower()
+            end)
+            for _, main in ipairs(rank.mains) do
+                table.sort(main.alts, function(a, b) return a.name:lower() < b.name:lower() end)
+            end
+            table.insert(ordered, rank)
+        end
+        table.sort(ordered, function(a, b)
+            if a.rankIndex ~= b.rankIndex then return a.rankIndex < b.rankIndex end
+            return a.rankName:lower() < b.rankName:lower()
         end)
+        return ordered
+    end
 
-        local y       = 0
-        local lineIdx = 0
-
-        local function AddLine(text, indent)
-            lineIdx = lineIdx + 1
-            local fs = GetLine(lineIdx)
-            fs:ClearAllPoints()
-            fs:SetPoint("TOPLEFT", content, "TOPLEFT", 6 + (indent or 0) * 16, -y)
-            fs:SetText(text)
-            fs:Show()
-            y = y + LINE_H
+    local function isRankShown(rankName)
+        if t._gtMultiRank then
+            local any = false
+            for _ in pairs(t._gtRankSelected) do any = true break end
+            if not any then return true end
+            return t._gtRankSelected[rankName] == true
         end
+        return t._gtSingleRank == nil or t._gtSingleRank == rankName
+    end
 
-        local lastRank = nil
-        local altCount = 0
-
-        for _, mainName in ipairs(uniqueMains) do
-            local ri = roster[mainName]
-            local rankName  = ri and ri.rankName  or "Unknown"
-            local rankIndex = ri and ri.rankIndex or 99
-
-            -- Rank group header
-            if rankName ~= lastRank then
-                if lastRank ~= nil then y = y + 5 end
-                AddLine(string.format("|cffd4af37[%s]|r", rankName), 0)
-                lastRank = rankName
+    local function updateRankButtons(ranks)
+        for _, b in ipairs(rankButtons) do b:Hide() end
+        wipe(rankButtons)
+        local y = -28
+        local function isSelected(rankName)
+            if t._gtMultiRank then
+                local any = false
+                for _ in pairs(t._gtRankSelected) do any = true break end
+                if not any then return true end
+                return t._gtRankSelected[rankName] == true
             end
-
-            -- Is this an alt registered as a main? (unlikely but guard it)
-            local ftEntry  = ft[mainName]
-            local online   = ri and ri.online or false
-            local dot      = online and "|cff00ff00\226\151\143|r " or "|cff555555\226\151\143|r "
-            local lv       = ri and ri.level  or "?"
-            local cl       = ri and ri.class  or "WARRIOR"
-            local alts     = GetAlts(mainName)
-            local hasAlts  = #alts > 0
-            local prefix   = hasAlts and "|cffaaaaaa+|r " or "  "
-
-            AddLine(string.format("%s%s%s%s|r  |cffaaaaaa(lv%s)%s|r",
-                prefix, dot, CC(cl), mainName, tostring(lv),
-                not ftEntry and "  |cff666666[unlinked]|r" or ""), 1)
-
-            for _, altName in ipairs(alts) do
-                altCount = altCount + 1
-                local ai  = roster[altName]
-                local aOn = ai and ai.online or false
-                local aDot = aOn and "|cff00ff00\226\151\143|r " or "|cff555555\226\151\143|r "
-                local aLv = ai and ai.level or "?"
-                local aCl = ai and ai.class or "WARRIOR"
-                AddLine(string.format("|cffaaaaaa\226\148\148|r %s%s%s|r  |cffaaaaaa(alt lv%s)|r",
-                    aDot, CC(aCl), altName, tostring(aLv)), 2)
-            end
+            return t._gtSingleRank == nil or t._gtSingleRank == rankName
         end
-
-        -- Footer
-        y = y + 6
-        AddLine(string.format("|cffaaaaaa%d members shown  \226\128\162  %d alts linked|r",
-            #uniqueMains, altCount), 0)
-
-        HideFrom(lineIdx + 1)
-        content:SetHeight(math.max(y + 20, 400))
-
-        -- Update status label
-        if t._gtStatusLbl then
-            t._gtStatusLbl:SetText(
-                string.format("|cffaaaaaa%d members  %d alts|r", #uniqueMains, altCount))
+        for _, rank in ipairs(ranks) do
+            local b = CreateFrame("Button", nil, sidebar, "UIPanelButtonTemplate")
+            b:SetSize(116, 20)
+            b:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 8, y)
+            b:SetText(rank.rankName)
+            b._rankName = rank.rankName
+            local selected = isSelected(rank.rankName)
+            b:SetAlpha(selected and 1 or 0.55)
+            b:SetScript("OnClick", function()
+                if t._gtMultiRank then
+                    t._gtRankSelected[rank.rankName] = not t._gtRankSelected[rank.rankName] or nil
+                else
+                    if t._gtSingleRank == rank.rankName then t._gtSingleRank = nil else t._gtSingleRank = rank.rankName end
+                end
+                if MTR.RefreshGuildTree then MTR.RefreshGuildTree() end
+            end)
+            table.insert(rankButtons, b)
+            y = y - 24
         end
     end
 
-    t._renderTree = RenderTree
+    local function render()
+        local ranks = buildTreeData()
+        updateRankButtons(ranks)
+        local query = string.lower((t._gtSearch or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+        local rowH = t._gtCompact and 15 or 18
+        local y = 0
+        local idx = 0
+        local shownMains, shownAlts = 0, 0
+
+        local function showRow(kind, indent, text, meta, alpha)
+            idx = idx + 1
+            local row = acquireRow(idx)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+            row:SetPoint("RIGHT", content, "RIGHT", -4, 0)
+            row:SetHeight(rowH)
+            row.label:SetPoint("LEFT", row, "LEFT", 4 + indent, 0)
+            row.label:SetText(text or "")
+            row.meta:SetText(meta or "")
+            row:Show()
+            row.label:SetAlpha(alpha or 1)
+            row.meta:SetAlpha(alpha or 1)
+            if kind == "rank" then row.bg:SetVertexColor(0.18, 0.05, 0.05, 0.50)
+            elseif kind == "main" then row.bg:SetVertexColor(0.08, 0.08, 0.10, 0.35)
+            else row.bg:SetVertexColor(0, 0, 0, 0) end
+            y = y + rowH
+            return row
+        end
+
+        for _, rank in ipairs(ranks) do
+            if isRankShown(rank.rankName) then
+                local mainsInRank = 0
+                for _, main in ipairs(rank.mains) do
+                    local textBlob = string.lower(main.name .. " " .. (main.info.rankName or ""))
+                    for _, alt in ipairs(main.alts) do textBlob = textBlob .. " " .. string.lower(alt.name) end
+                    if query == "" or string.find(textBlob, query, 1, true) then mainsInRank = mainsInRank + 1 end
+                end
+                if mainsInRank > 0 or query == "" then
+                    local rankRow = showRow("rank", 0, string.format("|cffd4af37%s|r", rank.rankName), string.format("%d mains", mainsInRank), 1)
+                    rankRow:SetScript("OnClick", function()
+                        if t._gtMultiRank then
+                            t._gtRankSelected[rank.rankName] = not t._gtRankSelected[rank.rankName] or nil
+                        else
+                            if t._gtSingleRank == rank.rankName then t._gtSingleRank = nil else t._gtSingleRank = rank.rankName end
+                        end
+                        render()
+                    end)
+
+                    for _, main in ipairs(rank.mains) do
+                        local textBlob = string.lower(main.name .. " " .. (main.info.rankName or ""))
+                        for _, alt in ipairs(main.alts) do textBlob = textBlob .. " " .. string.lower(alt.name) end
+                        if query == "" or string.find(textBlob, query, 1, true) then
+                            shownMains = shownMains + 1
+                            local expanded = t._gtExpandedMains[main.name] == true
+                            local arrow = expanded and "▼" or "▶"
+                            local dot = main.info.online and "|cff00ff00•|r" or "|cff666666•|r"
+                            local label = string.format("%s %s %s%s|r |cffaaaaaaLv%d|r", arrow, dot, CC(main.info.class), main.name, main.info.level or 0)
+                            local meta = (#main.alts > 0) and string.format("%d alts", #main.alts) or (main.info.rankName or "")
+                            local mainRow = showRow("main", 8, label, meta, 1)
+                            mainRow:SetScript("OnClick", function()
+                                t._gtExpandedMains[main.name] = not expanded or nil
+                                render()
+                            end)
+                            mainRow:SetScript("OnDoubleClick", mainRow:GetScript("OnClick"))
+                            if expanded then
+                                for _, alt in ipairs(main.alts) do
+                                    shownAlts = shownAlts + 1
+                                    local adot = alt.online and "|cff00ff00•|r" or "|cff666666•|r"
+                                    local altText = string.format("%s %s%s|r |cff888888Lv%d alt|r", adot, CC(alt.class), alt.name, alt.level or 0)
+                                    showRow("alt", 28, altText, main.name, 1)
+                                end
+                            end
+                        end
+                    end
+                    y = y + 4
+                end
+            end
+        end
+
+        for i = idx + 1, #rows do rows[i]:Hide() end
+        content:SetHeight(math.max(y + 10, 520))
+        if t._gtStatusLbl then
+            local mode = t._gtMultiRank and "multi-rank" or (t._gtSingleRank or "all ranks")
+            t._gtStatusLbl:SetText(string.format("|cffaaaaaa%d mains  %d alts  %s|r", shownMains, shownAlts, mode))
+        end
+    end
+
+    searchEB:SetScript("OnTextChanged", function(self)
+        t._gtSearch = self:GetText() or ""
+        render()
+    end)
+    multiCK:SetScript("OnClick", function(self)
+        t._gtMultiRank = self:GetChecked() and true or false
+        if not t._gtMultiRank then wipe(t._gtRankSelected) end
+        render()
+    end)
+    compactCK:SetScript("OnClick", function(self)
+        t._gtCompact = self:GetChecked() and true or false
+        render()
+    end)
+    expandBtn:SetScript("OnClick", function()
+        local ranks = buildTreeData()
+        for _, rank in ipairs(ranks) do
+            for _, main in ipairs(rank.mains) do
+                t._gtExpandedMains[main.name] = true
+            end
+        end
+        render()
+    end)
+    collapseBtn:SetScript("OnClick", function()
+        wipe(t._gtExpandedMains)
+        render()
+    end)
     refreshBtn:SetScript("OnClick", function()
         GuildRoster()
-        MTR.After(0.5, RenderTree)
+        MTR.After(0.5, function() ScanGuildNotes() render() end)
+        MTR.After(1.5, function() ScanGuildNotes() render() end)
     end)
 
+    t._renderTree = render
     MTR.RefreshGuildTree = function()
-        if t:IsVisible() then RenderTree() end
+        if t and t:IsVisible() and t._renderTree then t._renderTree() end
     end
 
-    -- Trigger note scan + render on first open
     GuildRoster()
-    MTR.After(1, function()
-        ScanGuildNotes()
-        RenderTree()
-    end)
+    MTR.After(0.5, function() ScanGuildNotes() render() end)
+    MTR.After(1.5, function() ScanGuildNotes() render() end)
 end

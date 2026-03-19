@@ -6,6 +6,8 @@
 ## SavedVariables: MekTownRecruitDB
 
 Core.lua
+GuildData.lua
+Settings.lua
 DKP.lua
 Auction.lua
 Roll.lua

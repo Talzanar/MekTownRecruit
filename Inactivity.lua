@@ -30,7 +30,7 @@ end
 -- Merge one kick entry into the local log (dedup + cap at 200)
 local function KKMergeEntry(entry)
     if not MTR.db then return false end
-    local log = MTR.db.inactivityKickLog
+    local log = ((MTR.GetGuildStore and MTR.GetGuildStore(true).inactivityKickLog) or MTR.db.inactivityKickLog)
     local key = KKKey(entry)
     for _, existing in ipairs(log) do
         if KKKey(existing) == key then return false end
@@ -52,6 +52,7 @@ function MTR.KickBroadcast(playerName, rank, daysInactive, kickedBy)
     }
     -- Store locally first (the kicker always has the record)
     KKMergeEntry(entry)
+    if MTR.AppendGuildEvent then MTR.AppendGuildEvent("inactivity", "kick", table.concat({entry.player or "", tostring(entry.daysInactive or 0), entry.kickedBy or ""}, "|")) end
     -- Broadcast to all online guild members with the addon
     if IsInGuild() then
         local rank_s  = entry.rank:gsub("|", ""):gsub(",", "")
@@ -62,7 +63,7 @@ function MTR.KickBroadcast(playerName, rank, daysInactive, kickedBy)
             .. rank_s            .. "|"
             .. days_s            .. "|"
             .. entry.kickedBy
-        SendAddonMessage(KK_PREFIX, packet, "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(KK_PREFIX, packet) else SendAddonMessage(KK_PREFIX, packet, "GUILD") end
         MTR.dprint("[KK Sync] Broadcast kick:", entry.player)
     end
 end

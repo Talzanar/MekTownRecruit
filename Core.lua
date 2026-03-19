@@ -478,11 +478,215 @@ local function EnsureProfile(name)
 end
 
 function MTR.GetActiveProfile()
-    local name = MekTownRecruitDB.activeProfile or "Default"
-    return EnsureProfile(name), name
+    if type(MekTownRecruitDB) ~= "table" then MekTownRecruitDB = {} end
+    if type(MekTownRecruitDB.profiles) ~= "table" then MekTownRecruitDB.profiles = {} end
+    local name = (type(MekTownRecruitDB.activeProfile) == "string" and MekTownRecruitDB.activeProfile ~= "") and MekTownRecruitDB.activeProfile or "Default"
+    MekTownRecruitDB.activeProfile = name
+    local profile = EnsureProfile(name)
+    MTR.db = profile
+    return profile, name
 end
 
-function MTR.RefreshDB()  MTR.db = MTR.GetActiveProfile() end
+local function NormalizeByDefaults(target, defaults)
+    if type(target) ~= "table" or type(defaults) ~= "table" then return end
+    for key, def in pairs(defaults) do
+        local cur = target[key]
+        if type(def) == "boolean" then
+            target[key] = (cur == true or cur == 1)
+        elseif type(def) == "table" and type(cur) == "table" then
+            NormalizeByDefaults(cur, def)
+        end
+    end
+end
+
+local function NormalizeProfileBooleans(profile)
+    if type(profile) ~= "table" then return profile end
+    NormalizeByDefaults(profile, MTR.DEFAULTS)
+    if profile.debug ~= nil then
+        profile.debug = (profile.debug == true or profile.debug == 1)
+    end
+    return profile
+end
+
+
+local function GetActiveProfileTable()
+    if type(MekTownRecruitDB) ~= "table" then return nil end
+    if type(MekTownRecruitDB.profiles) ~= "table" then return nil end
+    local name = MekTownRecruitDB.activeProfile or "Default"
+    local profile = MekTownRecruitDB.profiles[name]
+    if type(profile) ~= "table" then return nil end
+    return profile
+end
+
+local function GetMutableActiveProfileTable()
+    if type(MekTownRecruitDB) ~= "table" then MekTownRecruitDB = {} end
+    if type(MekTownRecruitDB.profiles) ~= "table" then MekTownRecruitDB.profiles = {} end
+    if type(MekTownRecruitDB.activeProfile) ~= "string" or MekTownRecruitDB.activeProfile == "" then
+        MekTownRecruitDB.activeProfile = "Default"
+    end
+    return EnsureProfile(MekTownRecruitDB.activeProfile)
+end
+
+function MTR.NormalizeChecked(value)
+    return (value == true or value == 1)
+end
+
+function MTR.TrimString(value)
+    if type(value) ~= "string" then return value end
+    return value:gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function SplitPath(path)
+    if type(path) ~= "string" or path == "" then return nil end
+    local parts = {}
+    for part in path:gmatch("[^%.]+") do
+        parts[#parts + 1] = part
+    end
+    return (#parts > 0) and parts or nil
+end
+
+local function GetDefaultForPath(path)
+    local parts = SplitPath(path)
+    local cur = MTR.DEFAULTS
+    if not parts then return nil end
+    for i = 1, #parts do
+        if type(cur) ~= "table" then return nil end
+        cur = cur[parts[i]]
+        if cur == nil then return nil end
+    end
+    return cur
+end
+
+local function EnsureProfilePath(profile, path)
+    local parts = SplitPath(path)
+    if type(profile) ~= "table" or not parts then return nil, nil end
+    local cur = profile
+    local defaults = MTR.DEFAULTS
+    for i = 1, #parts - 1 do
+        local key = parts[i]
+        if type(cur[key]) ~= "table" then
+            local def = type(defaults) == "table" and defaults[key] or nil
+            cur[key] = type(def) == "table" and MTR.DeepCopy(def) or {}
+        end
+        cur = cur[key]
+        defaults = type(defaults) == "table" and defaults[key] or nil
+    end
+    return cur, parts[#parts]
+end
+
+local function SetPathOnTable(root, path, value)
+    local parent, leaf = EnsureProfilePath(root, path)
+    if parent and leaf then
+        parent[leaf] = (type(value) == "table") and MTR.DeepCopy(value) or value
+        return parent[leaf]
+    end
+    return value
+end
+
+local function GetPathFromTable(root, path, default)
+    local parts = SplitPath(path)
+    local cur = root
+    if not parts or type(cur) ~= "table" then return default end
+    for i = 1, #parts do
+        cur = cur[parts[i]]
+        if cur == nil then
+            local def = GetDefaultForPath(path)
+            if def ~= nil then
+                return type(def) == "table" and MTR.DeepCopy(def) or def
+            end
+            return default
+        end
+    end
+    return cur
+end
+
+function MTR.SetPathOnTable(root, path, value)
+    return SetPathOnTable(root, path, value)
+end
+
+function MTR.GetPathFromTable(root, path, default)
+    return GetPathFromTable(root, path, default)
+end
+
+
+function MTR.SetProfilePath(path, value)
+    if type(path) ~= "string" or path == "" then return value end
+    local profile = GetMutableActiveProfileTable()
+    local saved = SetPathOnTable(profile, path, value)
+    MTR.db = profile
+    return saved
+end
+
+function MTR.GetProfilePath(path, default)
+    local profile = GetMutableActiveProfileTable()
+    return GetPathFromTable(profile, path, default)
+end
+
+function MTR.SetProfilePathBoolean(path, flag)
+    return MTR.SetProfilePath(path, flag and true or false)
+end
+
+function MTR.SetProfileValue(key, value)
+    return MTR.SetProfilePath(key, value)
+end
+
+function MTR.SetProfileBoolean(key, flag)
+    return MTR.SetProfilePathBoolean(key, flag and true or false)
+end
+
+function MTR.GetProfileValue(key, default)
+    return MTR.GetProfilePath(key, default)
+end
+
+function MTR.SetGuildInviteEnabled(flag)
+    return MTR.SetProfileBoolean("enableGuildInvites", flag == true)
+end
+
+function MTR.SetGuildInviteAnnounce(flag)
+    return MTR.SetProfileBoolean("inviteAnnounce", flag == true)
+end
+
+function MTR.GetGuildInviteEnabled()
+    return MTR.GetProfilePath("enableGuildInvites", false) == true
+end
+
+function MTR.GetGuildInviteAnnounceEnabled()
+    return MTR.GetProfilePath("enableGuildInvites", false) == true and MTR.GetProfilePath("inviteAnnounce", false) == true
+end
+
+function MTR.ReplaceActiveProfile(profile)
+    if type(profile) ~= "table" then return end
+    local active = GetMutableActiveProfileTable()
+    wipe(active)
+    for k, v in pairs(profile) do
+        active[k] = (type(v) == "table") and MTR.DeepCopy(v) or v
+    end
+    NormalizeProfileBooleans(active)
+    MTR.db = active
+end
+
+function MTR.FlushActiveProfile()
+    local profile = GetMutableActiveProfileTable()
+    if type(profile) ~= "table" then return end
+    NormalizeProfileBooleans(profile)
+    MTR.db = profile
+    if MTR.BindGuildScopedTables then MTR.BindGuildScopedTables() end
+end
+
+local _mtrPersistFrame = CreateFrame("Frame")
+_mtrPersistFrame:RegisterEvent("PLAYER_LOGOUT")
+_mtrPersistFrame:SetScript("OnEvent", function()
+    if MTR.CommitConfigState then
+        pcall(MTR.CommitConfigState)
+    end
+    MTR.FlushActiveProfile()
+end)
+
+function MTR.RefreshDB()
+    local profile = GetMutableActiveProfileTable()
+    MTR.db = NormalizeProfileBooleans(profile)
+    if MTR.BindGuildScopedTables then MTR.BindGuildScopedTables() end
+end
 
 function MTR.InitDB()
     if type(MekTownRecruitDB) ~= "table"          then MekTownRecruitDB = {} end
@@ -491,6 +695,7 @@ function MTR.InitDB()
        or MekTownRecruitDB.activeProfile == ""    then MekTownRecruitDB.activeProfile = "Default" end
     EnsureProfile("Default")
     MTR.RefreshDB()
+    if MTR.MigrateGuildScopedData then MTR.MigrateGuildScopedData() end
 
     for _, profile in pairs(MekTownRecruitDB.profiles) do
         if type(profile) == "table" then
@@ -501,11 +706,11 @@ function MTR.InitDB()
 
             -- Normalize legacy checkbox-backed flags to strict booleans so old
             -- saves cannot accidentally enable features through truthy values.
-            profile.enableGuildInvites = (profile.enableGuildInvites == true)
-            profile.inviteAnnounce = (profile.inviteAnnounce == true)
+            NormalizeProfileBooleans(profile)
         end
     end
     MTR.RefreshDB()
+    if MTR.MigrateGuildScopedData then MTR.MigrateGuildScopedData() end
 
     -- Ensure account-wide storage exists
     if type(MekTownRecruitDB.charVault) ~= "table" then
@@ -815,3 +1020,4 @@ function MTR.CanInvite()
 end
 
 print("|cff00c0ff[MekTown Recruit]|r Core v" .. MTR.VERSION .. " loaded.")
+

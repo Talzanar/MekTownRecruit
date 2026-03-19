@@ -14,6 +14,121 @@ local function MPE(m) MTR.MPE(m) end
 -- (they need to be visible to the profile button callbacks)
 local mainWin   = nil
 local panel     = MTR.panel
+local Settings  = MTR.Settings
+
+local function CfgDB()
+    if type(MekTownRecruitDB) ~= "table" then MekTownRecruitDB = {} end
+    if type(MekTownRecruitDB.profiles) ~= "table" then MekTownRecruitDB.profiles = {} end
+    if type(MekTownRecruitDB.activeProfile) ~= "string" or MekTownRecruitDB.activeProfile == "" then
+        MekTownRecruitDB.activeProfile = "Default"
+    end
+    if type(MekTownRecruitDB.profiles[MekTownRecruitDB.activeProfile]) ~= "table" then
+        if MTR and MTR.GetActiveProfile then
+            local profile = MTR.GetActiveProfile()
+            if type(profile) == "table" then return profile end
+        end
+        MekTownRecruitDB.profiles[MekTownRecruitDB.activeProfile] = {}
+    end
+    local profile = MekTownRecruitDB.profiles[MekTownRecruitDB.activeProfile]
+    MTR.db = profile
+    return profile
+end
+
+local function DirectSetValue(path, value)
+    local cfg = CfgDB()
+    if MTR and MTR.SetPathOnTable then
+        MTR.SetPathOnTable(cfg, path, value)
+    else
+        cfg[path] = value
+    end
+    MTR.db = cfg
+    if mainWin and not mainWin._refreshing then mainWin._dirty = true end
+    return value
+end
+
+local function SaveValue(path, value)
+    return DirectSetValue(path, value)
+end
+
+local function SaveBool(path, value)
+    local checked = (MTR.NormalizeChecked and MTR.NormalizeChecked(value)) or (value and true or false)
+    return DirectSetValue(path, checked and true or false)
+end
+
+local function SaveTable(path, value)
+    return DirectSetValue(path, value or {})
+end
+
+local function SaveText(path, value)
+    return DirectSetValue(path, tostring(value or ""))
+end
+
+local function SaveSlider(path, value, step)
+    local n = tonumber(value) or 0
+    if step and step > 0 then
+        n = math.floor(n / step) * step
+    end
+    return DirectSetValue(path, n)
+end
+
+local function ForcePersistGuildInviteWidgets()
+    if not mainWin then return end
+    if mainWin._guildInvEnable then SaveBool("enableGuildInvites", mainWin._guildInvEnable:GetChecked()) end
+    if mainWin._guildInvAnnounce then SaveBool("inviteAnnounce", mainWin._guildInvAnnounce:GetChecked()) end
+    if mainWin._guildWelcomeEB then SaveText("inviteWelcomeMsg", mainWin._guildWelcomeEB:GetText() or "") end
+    if mainWin._guildInvCooldown then SaveSlider("inviteCooldown", mainWin._guildInvCooldown:GetValue() or 60, 10) end
+    if mainWin._guildAutoReply then SaveBool("autoResponderEnabled", mainWin._guildAutoReply:GetChecked()) end
+    MTR.db = CfgDB()
+    if mainWin and not mainWin._refreshing then mainWin._dirty = true end
+end
+
+
+local function DirectSet(path, value)
+    if MTR and MTR.SetProfilePath then
+        MTR.SetProfilePath(path, value)
+    end
+end
+
+local function DirectSetBool(path, value)
+    local checked = (MTR.NormalizeChecked and MTR.NormalizeChecked(value)) or (value and true or false)
+    DirectSet(path, checked and true or false)
+end
+
+local function DirectSetText(path, value)
+    DirectSet(path, tostring(value or ""))
+end
+
+local function DirectSetSlider(path, value, step)
+    local n = tonumber(value) or 0
+    if step and step > 0 then
+        n = math.floor(n / step) * step
+    end
+    DirectSet(path, n)
+end
+
+local function SnapshotAllConfigWidgets()
+    if not mainWin then return end
+    if CommitGuildTabState then CommitGuildTabState() end
+    if mainWin._chanChecks then
+        local scanChannels = {}
+        for _, ck in ipairs(mainWin._chanChecks) do
+            if ck and ck.channel then
+                scanChannels[ck.channel] = (MTR.NormalizeChecked and MTR.NormalizeChecked(ck:GetChecked())) or (ck:GetChecked() and true or false)
+            end
+        end
+        DirectSet("scanChannels", scanChannels)
+    end
+
+    if mainWin._dkpChanDD then
+        local selected = UIDropDownMenu_GetSelectedValue(mainWin._dkpChanDD)
+        if selected and selected ~= "" then DirectSet("dkpPublishChannel", selected) end
+    end
+
+    if mainWin._adChanEB then
+        local channelNum = tonumber((mainWin._adChanEB:GetText() or ""):match("%d+")) or 1
+        DirectSet("guildAdConfig.channelNum", channelNum)
+    end
+end
 
 -- ============================================================================
 -- CREATE MAIN WINDOW  (called once, cached)
@@ -113,6 +228,8 @@ local function CreateMainWindow()
     mainWin._profCopy = nil
     mainWin._profDel  = nil
 
+    mainWin._settingBindings = {}
+
     -- =========================================================================
     -- TAB SYSTEM
     -- =========================================================================
@@ -186,11 +303,21 @@ local function CreateMainWindow()
 
     local function ShowTab(name)
         for _, fr in pairs(tabFrames) do fr:Hide() end
+        local builtNow = false
         if tabBuilders[name] and not tabBuilt[name] then
             tabBuilders[name](tabFrames[name])
             tabBuilt[name] = true
+            builtNow = true
         end
         if tabFrames[name] then tabFrames[name]:Show() end
+        -- Critical persistence/UI fix:
+        -- Several tabs are lazy-built. Their controls start with empty/default
+        -- widget state until a refresh hydrates them from SavedVariables.
+        -- Without this, first opening a lazy tab after /reload makes it look like
+        -- settings were not saved even though the DB may already contain values.
+        if mainWin and mainWin.Refresh and (builtNow or (mainWin._settingsBindings and #mainWin._settingsBindings > 0)) then
+            mainWin:Refresh()
+        end
     end
     mainWin._showTab = ShowTab
 
@@ -292,7 +419,7 @@ local function CreateMainWindow()
         end)
         profCopy:SetScript("OnClick",function()
             StaticPopupDialogs["MEKTOWN_COPY_PROF2"]={text="Copy as:",button1="Copy",button2="Cancel",hasEditBox=true,maxLetters=40,
-                OnAccept=function(self) local n=self.editBox:GetText():match("^%s*(.-)%s*$") if n~="" then MekTownRecruitDB.profiles[n]=MTR.DeepCopy(MTR.db) MekTownRecruitDB.activeProfile=n MTR.RefreshDB() mainWin:Refresh() RebuildPDD() MP("Copied to: "..n) end end,
+                OnAccept=function(self) local n=self.editBox:GetText():match("^%s*(.-)%s*$") if n~="" then MekTownRecruitDB.profiles[n]=MTR.DeepCopy(CfgDB()) MekTownRecruitDB.activeProfile=n MTR.RefreshDB() mainWin:Refresh() RebuildPDD() MP("Copied to: "..n) end end,
                 timeout=0,whileDead=true,hideOnEscape=true}
             StaticPopup_Show("MEKTOWN_COPY_PROF2")
         end)
@@ -432,8 +559,8 @@ local function CreateMainWindow()
         local viewAllBtn = MakeBT(t,"View All",80,22)
         viewAllBtn:SetPoint("TOPLEFT",t,"TOPLEFT",0,-336)
         viewAllBtn:SetScript("OnClick",function()
-            if not MTR.db then return end
-            local hist = MTR.db.recruitHistory or {}
+            if not CfgDB() then return end
+            local hist = CfgDB().recruitHistory or {}
             local lines = { string.format("%-20s | %-16s | %s", "Recruit", "Sent By", "Date"), string.rep("-", 58) }
             for i = #hist, 1, -1 do
                 local e = hist[i]
@@ -452,11 +579,11 @@ local function CreateMainWindow()
         local expO = MakeBT(t,"Officer",64,22)  expO:SetPoint("LEFT",expG,"RIGHT",3,0)
         local expP = MakeBT(t,"Print",56,22)    expP:SetPoint("LEFT",expO,"RIGHT",3,0)
         local clrH = MakeBT(t,"Clear",56,22)    clrH:SetPoint("LEFT",expP,"RIGHT",3,0)
-        expG:SetScript("OnClick",function() if MTR.db then MTR.ExportHistory(MTR.FormatRecruitHistory(MTR.db.recruitHistory),"GUILD") end end)
-        expO:SetScript("OnClick",function() if MTR.db then MTR.ExportHistory(MTR.FormatRecruitHistory(MTR.db.recruitHistory),"OFFICER") end end)
-        expP:SetScript("OnClick",function() if MTR.db then MTR.ExportHistory(MTR.FormatRecruitHistory(MTR.db.recruitHistory),"PRINT") end end)
+        expG:SetScript("OnClick",function() if CfgDB() then MTR.ExportHistory(MTR.FormatRecruitHistory(CfgDB().recruitHistory),"GUILD") end end)
+        expO:SetScript("OnClick",function() if CfgDB() then MTR.ExportHistory(MTR.FormatRecruitHistory(CfgDB().recruitHistory),"OFFICER") end end)
+        expP:SetScript("OnClick",function() if CfgDB() then MTR.ExportHistory(MTR.FormatRecruitHistory(CfgDB().recruitHistory),"PRINT") end end)
         clrH:SetScript("OnClick",function()
-            if MTR.db then MTR.db.recruitHistory={} end
+            if CfgDB() then CfgDB().recruitHistory={} end
             histEB:SetText("Cleared.")
         end)
 
@@ -473,16 +600,16 @@ local function CreateMainWindow()
         local adPostEditBtn = MakeBT(t,"Edit Messages",120,24)
         adPostEditBtn:SetPoint("TOPLEFT",t,"TOPLEFT",0,-422)
         adPostEditBtn:SetScript("OnClick",function()
-            if not MTR.db then return end
+            if not CfgDB() then return end
             local lines={}
-            for _, m in ipairs(MTR.db.guildAdMessages or {}) do
+            for _, m in ipairs(CfgDB().guildAdMessages or {}) do
                 lines[#lines+1] = (m.enabled==false and "#DISABLED# " or "") .. (m.text or "")
             end
             OpenEP(
                 "Edit Guild Ad Messages\n|cffaaaaaa(one per line — prefix with #DISABLED# to disable a message\n{star} {skull} {triangle} etc. are substituted when posting)|r",
                 table.concat(lines,"\n"),
                 function(text)
-                    MTR.db.guildAdMessages = {}
+                    CfgDB().guildAdMessages = {}
                     for line in text:gmatch("([^\n]+)") do
                         local enabled = true
                         local msg = line:match("^%s*(.-)%s*$")
@@ -491,12 +618,12 @@ local function CreateMainWindow()
                             msg = msg:sub(12):match("^%s*(.-)%s*$")
                         end
                         if msg ~= "" then
-                            MTR.db.guildAdMessages[#MTR.db.guildAdMessages+1] = {text=msg, enabled=enabled}
+                            CfgDB().guildAdMessages[#CfgDB().guildAdMessages+1] = {text=msg, enabled=enabled}
                         end
                     end
                     local en=0
-                    for _,m in ipairs(MTR.db.guildAdMessages) do if m.enabled~=false then en=en+1 end end
-                    adPostDisplay:SetText(#MTR.db.guildAdMessages.." messages ("..en.." enabled)")
+                    for _,m in ipairs(CfgDB().guildAdMessages) do if m.enabled~=false then en=en+1 end end
+                    adPostDisplay:SetText(#CfgDB().guildAdMessages.." messages ("..en.." enabled)")
                 end
             )
         end)
@@ -519,8 +646,8 @@ local function CreateMainWindow()
             adIntBtns[i]=btn
             do local m=mins
                 btn:SetScript("OnClick",function()
-                    if MTR.db and MTR.db.guildAdConfig then
-                        MTR.db.guildAdConfig.intervalMins = m
+                    if CfgDB() and CfgDB().guildAdConfig then
+                        CfgDB().guildAdConfig.intervalMins = m
                     end
                     -- Highlight selected
                     for _, b in ipairs(adIntBtns) do b:UnlockHighlight() end
@@ -541,9 +668,10 @@ local function CreateMainWindow()
         adChanEB:SetText("1")
         adChanEB:SetScript("OnTextChanged",function(s)
             local n = tonumber(s:GetText() or "1") or 1
-            if MTR.db and MTR.db.guildAdConfig then MTR.db.guildAdConfig.channelNum = n end
+            if CfgDB() and CfgDB().guildAdConfig then CfgDB().guildAdConfig.channelNum = n end
         end)
         mainWin._adChanEB = adChanEB
+        if Settings then Settings.BindEdit(mainWin, mainWin._adChanEB, "guildAdConfig.channelNum") end
 
         -- Status label
         local adStatusLbl = t:CreateFontString(nil,"OVERLAY","GameFontHighlight")
@@ -585,41 +713,51 @@ local function CreateMainWindow()
         rcHdr:SetText("|cffaaaaaa— Scanner Settings —|r")
 
         mainWin._ckEnable  = MakeCK("RcEnable",  t,"Enable recruitment scanner",  RX,  -18)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckEnable, "enabled") end
         mainWin._ckGuild   = MakeCK("RcGuild",   t,"Require 'guild' in message",  RX,  -44)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckGuild, "requireGuildWord") end
         mainWin._ckSound   = MakeCK("RcSound",   t,"Sound alert on popup",        RX,  -72)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckSound, "soundAlert") end
         mainWin._ckMinimap = MakeCK("RcMinimap", t,"Show minimap button",         RX, -100)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckMinimap, "minimapButton") end
         mainWin._ckDebug   = MakeCK("RcDebug",   t,"Enable Debug",               RX, -128)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckDebug, "enableDebug") end
         mainWin._ckIgnAds  = MakeCK("RcIgnAds",  t,"Ignore recruitment ads",      RX, -156)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckIgnAds, "ignoreAds") end
 
         local lbl1 = t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl1:SetPoint("TOPLEFT",t,"TOPLEFT",RX,-186) lbl1:SetText("Additional required words (comma-sep):")
         mainWin._addReqEB = MakeIn("AddReq",t,RW,RX,-202)
+        if Settings then Settings.BindEdit(mainWin, mainWin._addReqEB, "additionalRequired") end
 
         local lbl2 = t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl2:SetPoint("TOPLEFT",t,"TOPLEFT",RX,-232) lbl2:SetText("Ignore duration (seconds):")
         mainWin._slIgnore = MakeSL("Ignore",t,RW,RX,-248,60,3600,60)
+        if Settings then Settings.BindSlider(mainWin, mainWin._slIgnore, "ignoreDuration", {default=300, step=60}) end
         mainWin._slIgnore:SetScript("OnValueChanged",function(s,v)
             local r=math.floor(v/60)*60
             _G["MekSLv_IgnoreText"]:SetText(r.."s")
-            if MTR.db then MTR.db.ignoreDuration=r end
+            SaveValue("ignoreDuration", r)
         end)
 
         local lbl3 = t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl3:SetPoint("TOPLEFT",t,"TOPLEFT",RX,-292) lbl3:SetText("Popup width:")
         mainWin._slPopW = MakeSL("PopW",t,RW,RX,-308,200,600,10)
+        if Settings then Settings.BindSlider(mainWin, mainWin._slPopW, "popupWidth", {default=350, step=10}) end
         mainWin._slPopW:SetScript("OnValueChanged",function(s,v)
             local r=math.floor(v/10)*10
             _G["MekSLv_PopWText"]:SetText(r)
-            if MTR.db then MTR.db.popupWidth=r end
+            SaveValue("popupWidth", r)
         end)
 
         local lbl4 = t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl4:SetPoint("TOPLEFT",t,"TOPLEFT",RX,-352) lbl4:SetText("Popup height:")
         mainWin._slPopH = MakeSL("PopH",t,RW,RX,-368,100,400,10)
+        if Settings then Settings.BindSlider(mainWin, mainWin._slPopH, "popupHeight", {default=180, step=10}) end
         mainWin._slPopH:SetScript("OnValueChanged",function(s,v)
             local r=math.floor(v/10)*10
             _G["MekSLv_PopHText"]:SetText(r)
-            if MTR.db then MTR.db.popupHeight=r end
+            SaveValue("popupHeight", r)
         end)
 
         MakeSep(t,"Scan Channels",-412)
@@ -639,211 +777,334 @@ local function CreateMainWindow()
             _G["MekCK_"..cname.."Text"]:SetText(cd[2])
             ck.channel = cd[1]
             ck:SetScript("OnClick",function(s)
-                if not MTR.db.scanChannels then MTR.db.scanChannels={} end
-                MTR.db.scanChannels[s.channel]=s:GetChecked()
+                SaveBool("scanChannels."..s.channel, s:GetChecked())
             end)
             mainWin._chanChecks[i] = ck
         end
 
         -- Wire edit buttons
         kwEditBtn:SetScript("OnClick",function()
-            OpenEP("Edit Keywords", table.concat(MTR.db.keywords or {}, "\n"), function(text)
-                MTR.db.keywords = {}
+            OpenEP("Edit Keywords", table.concat(CfgDB().keywords or {}, "\n"), function(text)
+                local newKeywords = {}
                 for line in text:gmatch("([^\n]+)") do
-                    local s=line:match("^%s*(.-)%s*$") if s~="" then MTR.db.keywords[#MTR.db.keywords+1]=s end
+                    local s=line:match("^%s*(.-)%s*$") if s~="" then newKeywords[#newKeywords+1]=s end
                 end
-                kwDisplay:SetText(Trunc(#MTR.db.keywords.." keywords saved.", 50))
+                local savedKeywords = SaveTable("keywords", newKeywords)
+                kwDisplay:SetText(Trunc(#savedKeywords.." keywords saved.", 50))
             end)
         end)
         wtEditBtn:SetScript("OnClick",function()
-            OpenEP("Edit Whisper Templates", table.concat(MTR.db.whisperTemplates or {}, "\n"), function(text)
-                MTR.db.whisperTemplates = {}
+            OpenEP("Edit Whisper Templates", table.concat(CfgDB().whisperTemplates or {}, "\n"), function(text)
+                local newTemplates = {}
                 for line in text:gmatch("([^\n]+)") do
-                    local s=line:match("^%s*(.-)%s*$") if s~="" then MTR.db.whisperTemplates[#MTR.db.whisperTemplates+1]=s end
+                    local s=line:match("^%s*(.-)%s*$") if s~="" then newTemplates[#newTemplates+1]=s end
                 end
-                wtDisplay:SetText(Trunc(#MTR.db.whisperTemplates.." templates saved.", 50))
+                local savedTemplates = SaveTable("whisperTemplates", newTemplates)
+                wtDisplay:SetText(Trunc(#savedTemplates.." templates saved.", 50))
             end)
         end)
         adEditBtn:SetScript("OnClick",function()
-            OpenEP("Edit Ad Detection Phrases", table.concat(MTR.db.adPatterns or {}, "\n"), function(text)
-                MTR.db.adPatterns = {}
+            OpenEP("Edit Ad Detection Phrases", table.concat(CfgDB().adPatterns or {}, "\n"), function(text)
+                local newPatterns = {}
                 for line in text:gmatch("([^\n]+)") do
-                    local s=line:match("^%s*(.-)%s*$") if s~="" then MTR.db.adPatterns[#MTR.db.adPatterns+1]=s end
+                    local s=line:match("^%s*(.-)%s*$") if s~="" then newPatterns[#newPatterns+1]=s end
                 end
-                adDisplay:SetText(Trunc(#MTR.db.adPatterns.." phrases saved.", 50))
+                local savedPatterns = SaveTable("adPatterns", newPatterns)
+                adDisplay:SetText(Trunc(#savedPatterns.." phrases saved.", 50))
             end)
         end)
 
         mainWin._ckEnable:SetScript("OnClick",function(s)
-            MTR.db.enabled = (s:GetChecked() and true or false)
-            if MTR.db.enabled then
+            SaveBool("enabled", s:GetChecked())
+            if CfgDB().enabled then
                 MTR.MP("|cff00ff00Scanner enabled.|r")
             else
                 MTR.MP("|cffff4444Scanner disabled.|r")
             end
         end)
-        mainWin._ckGuild:SetScript("OnClick",   function(s) MTR.db.requireGuildWord = s:GetChecked() end)
-        mainWin._ckSound:SetScript("OnClick",   function(s) MTR.db.soundAlert       = s:GetChecked() end)
-        mainWin._ckMinimap:SetScript("OnClick", function(s) MTR.db.minimapButton    = s:GetChecked() end)
-        mainWin._ckDebug:SetScript("OnClick",   function(s) MTR.SetDebugEnabled(s:GetChecked()) end)
-        mainWin._ckIgnAds:SetScript("OnClick",  function(s) MTR.db.ignoreAds        = s:GetChecked() end)
-        mainWin._addReqEB:SetScript("OnTextChanged", function(s) MTR.db.additionalRequired = s:GetText() end)
+        mainWin._ckGuild:SetScript("OnClick",   function(s) SaveBool("requireGuildWord", s:GetChecked()) end)
+        mainWin._ckSound:SetScript("OnClick",   function(s) SaveBool("soundAlert", s:GetChecked()) end)
+        mainWin._ckMinimap:SetScript("OnClick", function(s) SaveBool("minimapButton", s:GetChecked()) end)
+        mainWin._ckDebug:SetScript("OnClick",   function(s) SaveBool("enableDebug", s:GetChecked()) end)
+        mainWin._ckIgnAds:SetScript("OnClick",  function(s) SaveBool("ignoreAds", s:GetChecked()) end)
+        mainWin._addReqEB:SetScript("OnTextChanged", function(s) SaveValue("additionalRequired", s:GetText() or "") end)
     end
 
     -- =========================================================================
     -- GUILD TAB  (lazy-built on first click)
     -- =========================================================================
+    local function CommitGuildTabState()
+        if not mainWin then return end
+        ForcePersistGuildInviteWidgets()
+        local cfg = CfgDB()
+        if type(cfg) ~= "table" then return end
+        if mainWin._ikDisplay then
+            mainWin._ikDisplay:SetText(Trunc((#(cfg.inviteKeywords or {})).." keywords", 60))
+        end
+        if mainWin._arDisplay then
+            mainWin._arDisplay:SetText(Trunc((#(cfg.autoResponses or {})).." responses", 60))
+        end
+        if mainWin._motdDisplay then
+            local motdKeys = {}
+            for k in pairs(cfg.motdTemplates or {}) do motdKeys[#motdKeys+1] = k end
+            table.sort(motdKeys)
+            mainWin._motdDisplay:SetText(Trunc(#motdKeys > 0 and table.concat(motdKeys, ", ") or "None", 60))
+        end
+    end
+
+    local function RefreshGuildTabState()
+        if not mainWin then return end
+        local cfg = CfgDB()
+        if type(cfg) ~= "table" then return end
+
+        if mainWin._guildInvEnable then mainWin._guildInvEnable:SetChecked(cfg.enableGuildInvites == true) end
+        if mainWin._guildInvAnnounce then mainWin._guildInvAnnounce:SetChecked(cfg.inviteAnnounce == true) end
+        if mainWin._guildWelcomeEB then mainWin._guildWelcomeEB:SetText(cfg.inviteWelcomeMsg or "") end
+        if MTR.EnsureGuildIdentity then pcall(MTR.EnsureGuildIdentity) end
+        if mainWin._guildIdFS and MTR.GetGuildIdentityInfo then
+            local info = MTR.GetGuildIdentityInfo()
+            mainWin._guildIdFS:SetText("Guild: |cff00ff00" .. tostring(info.guildName or "NoGuild") .. "|r   Realm: |cff00ff00" .. tostring(info.realm or "UnknownRealm") .. "|r\nGuild ID: |cffffff00" .. tostring(info.guildId or "UNSET") .. "|r")
+        end
+        if mainWin._guildInvCooldown then mainWin._guildInvCooldown:SetValue(tonumber(cfg.inviteCooldown) or 60) end
+        if mainWin._guildAutoReply then mainWin._guildAutoReply:SetChecked(cfg.autoResponderEnabled == true) end
+        if mainWin._ikDisplay then
+            mainWin._ikDisplay:SetText(Trunc((#(cfg.inviteKeywords or {})).." keywords", 60))
+        end
+        if mainWin._arDisplay then
+            mainWin._arDisplay:SetText(Trunc((#(cfg.autoResponses or {})).." responses", 60))
+        end
+        if mainWin._motdDisplay then
+            local motdKeys = {}
+            for k in pairs(cfg.motdTemplates or {}) do motdKeys[#motdKeys+1] = k end
+            table.sort(motdKeys)
+            mainWin._motdDisplay:SetText(Trunc(#motdKeys > 0 and table.concat(motdKeys, ", ") or "None", 60))
+        end
+    end
+
     tabBuilders["Guild"] = function(t)
         if t.SetClipsChildren then t:SetClipsChildren(true) end
+
         local scroll = CreateFrame("ScrollFrame", nil, t, "UIPanelScrollFrameTemplate")
         scroll:SetPoint("TOPLEFT", t, "TOPLEFT", 6, -6)
         scroll:SetPoint("BOTTOMRIGHT", t, "BOTTOMRIGHT", -28, 8)
 
         local content = CreateFrame("Frame", nil, scroll)
         content:SetWidth(820)
-        content:SetHeight(1220)
+        content:SetHeight(1040)
         if content.SetClipsChildren then content:SetClipsChildren(true) end
         scroll:SetScrollChild(content)
-        t = content
 
         local PANEL_W = 780
         local LEFT = 12
         local FIELD_X = LEFT + 16
         local FIELD_W = PANEL_W - 32
+        local y = -10
 
-        local hdr = t:CreateFontString(nil,"OVERLAY","GameFontNormalLarge")
-        hdr:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -10)
-        hdr:SetWidth(PANEL_W)
-        hdr:SetJustifyH("LEFT")
-        hdr:SetText("|cffff2020Guild Settings|r")
+        local function AddHeader(text, desc)
+            local hdr = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+            hdr:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
+            hdr:SetWidth(PANEL_W)
+            hdr:SetJustifyH("LEFT")
+            hdr:SetText(text)
+            y = y - 26
 
-        local desc = t:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
-        desc:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -36)
-        desc:SetWidth(PANEL_W)
-        desc:SetJustifyH("LEFT")
-        desc:SetWordWrap(true)
-        desc:SetText("|cffaaaaaaGuild automation, messaging, and invite configuration. Content is contained inside a fixed-width scroll panel and kept left-aligned so nothing bleeds outside the tab bounds.|r")
+            if desc then
+                local fs = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                fs:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
+                fs:SetWidth(PANEL_W)
+                fs:SetJustifyH("LEFT")
+                fs:SetWordWrap(true)
+                fs:SetText(desc)
+                y = y - 36
+            end
 
-        local topSep = t:CreateTexture(nil, "ARTWORK")
-        topSep:SetColorTexture(0.3,0.3,0.5,0.5)
-        topSep:SetHeight(1)
-        topSep:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -66)
-        topSep:SetPoint("TOPRIGHT", t, "TOPLEFT", LEFT + PANEL_W, -66)
+            local sep = content:CreateTexture(nil, "ARTWORK")
+            sep:SetColorTexture(0.3, 0.3, 0.5, 0.45)
+            sep:SetHeight(1)
+            sep:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
+            sep:SetPoint("TOPRIGHT", content, "TOPLEFT", LEFT + PANEL_W, y)
+            y = y - 18
+        end
 
-        local autoInviteHdr = t:CreateFontString(nil,"OVERLAY","GameFontNormalLarge")
-        autoInviteHdr:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -84)
-        autoInviteHdr:SetWidth(PANEL_W)
-        autoInviteHdr:SetJustifyH("LEFT")
-        autoInviteHdr:SetText("|cffd4af37Guild Invite|r")
+        local function AddLabel(text)
+            local fs = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            fs:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
+            fs:SetWidth(PANEL_W)
+            fs:SetJustifyH("LEFT")
+            fs:SetText(text)
+            y = y - 20
+            return fs
+        end
 
-        mainWin._ckInvEnable   = MakeCK("InvEn",  t, "Enable auto-invite from guild chat", FIELD_X,  -116)
-        mainWin._ckInvAnnounce = MakeCK("InvAnn", t, "Announce invite in guild chat",      FIELD_X, -144)
-        mainWin._ckInvEnable:SetScript("OnClick",   function(s) MTR.db.enableGuildInvites=(s:GetChecked() and true or false) end)
-        mainWin._ckInvAnnounce:SetScript("OnClick", function(s) MTR.db.inviteAnnounce=(s:GetChecked() and true or false) end)
+        AddHeader("|cffff2020Guild Settings|r", "Guild invite, messaging, and automation controls. This tab is rebuilt as a contained left-aligned scroll layout with direct profile-backed saves.")
 
-        local lbl1 = t:CreateFontString(nil,"OVERLAY","GameFontNormal")
-        lbl1:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -182)
-        lbl1:SetWidth(PANEL_W)
-        lbl1:SetJustifyH("LEFT")
-        lbl1:SetText("Welcome whisper to new guild members (blank = off):")
-        mainWin._invWelcomeEB = MakeIn("InvWelcome", t, FIELD_W, FIELD_X, -202)
-        mainWin._invWelcomeEB:SetScript("OnTextChanged",function(s) MTR.db.inviteWelcomeMsg=s:GetText() end)
+        local inviteHdr = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        inviteHdr:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
+        inviteHdr:SetWidth(PANEL_W)
+        inviteHdr:SetJustifyH("LEFT")
+        inviteHdr:SetText("|cffd4af37Guild Invite|r")
+        y = y - 32
 
-        local lbl2 = t:CreateFontString(nil,"OVERLAY","GameFontNormal")
-        lbl2:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -236)
-        lbl2:SetWidth(PANEL_W)
-        lbl2:SetJustifyH("LEFT")
-        lbl2:SetText("Invite cooldown (seconds):")
-        mainWin._invCDSld = MakeSL("InvCD", t, 420, FIELD_X, -256, 30, 600, 10)
-        mainWin._invCDSld:SetScript("OnValueChanged",function(s,v)
-            local r=math.floor(v/10)*10
-            _G["MekSLv_InvCDText"]:SetText(r.."s")
-            if MTR.db then MTR.db.inviteCooldown=r end
+        mainWin._guildInvEnable = MakeCK("InvEn", content, "Enable auto-invite from guild chat", FIELD_X, y)
+        mainWin._guildInvEnable:SetScript("OnClick", function(self) SaveBool("enableGuildInvites", self:GetChecked()) end)
+        y = y - 28
+
+        mainWin._guildInvAnnounce = MakeCK("InvAnn", content, "Announce invite in guild chat", FIELD_X, y)
+        mainWin._guildInvAnnounce:SetScript("OnClick", function(self) SaveBool("inviteAnnounce", self:GetChecked()) end)
+        y = y - 38
+
+        AddLabel("Welcome whisper to new guild members (blank = off):")
+        mainWin._guildWelcomeEB = MakeIn("InvWelcome", content, FIELD_W, FIELD_X, y)
+        mainWin._guildWelcomeEB:SetScript("OnTextChanged", function(self) if not mainWin._refreshing then SaveText("inviteWelcomeMsg", self:GetText() or "") end end)
+        mainWin._guildWelcomeEB:SetScript("OnEnterPressed", function(self) SaveText("inviteWelcomeMsg", self:GetText() or ""); self:ClearFocus() end)
+        mainWin._guildWelcomeEB:SetScript("OnEscapePressed", function(self) SaveText("inviteWelcomeMsg", self:GetText() or ""); self:ClearFocus() end)
+        mainWin._guildWelcomeEB:SetScript("OnEditFocusLost", function(self) SaveText("inviteWelcomeMsg", self:GetText() or "") end)
+        y = y - 42
+
+        AddLabel("Invite cooldown (seconds):")
+        mainWin._guildInvCooldown = MakeSL("InvCD", content, 420, FIELD_X, y, 30, 600, 10)
+        mainWin._guildInvCooldown:SetScript("OnValueChanged", function(self, value)
+            local r = math.max(30, math.min(600, math.floor((tonumber(value) or 60) / 10) * 10))
+            local label = _G["MekSLv_InvCDText"]
+            if label then label:SetText(r.."s") end
+            if not mainWin._refreshing then SaveSlider("inviteCooldown", r, 10) end
         end)
+        y = y - 58
 
-        MakeSep(t,"Invite Keywords",-302)
-        local ikDisplay = t:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-        ikDisplay:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -320)
+        MakeSep(content, "Invite Keywords", y)
+        y = y - 20
+        local ikDisplay = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        ikDisplay:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
         ikDisplay:SetWidth(PANEL_W)
         ikDisplay:SetWordWrap(true)
         ikDisplay:SetJustifyH("LEFT")
         ikDisplay:SetText("Loading...")
         mainWin._ikDisplay = ikDisplay
+        y = y - 28
 
-        local ikEditBtn = MakeBT(t,"Edit Keywords",130,24)
-        ikEditBtn:SetPoint("TOPLEFT", t, "TOPLEFT", FIELD_X, -348)
-        ikEditBtn:SetScript("OnClick",function()
-            OpenEP("Edit Invite Keywords", table.concat(MTR.db.inviteKeywords or {},"\n"), function(text)
-                MTR.db.inviteKeywords={}
+        local ikEditBtn = MakeBT(content, "Edit Keywords", 130, 24)
+        ikEditBtn:SetPoint("TOPLEFT", content, "TOPLEFT", FIELD_X, y)
+        ikEditBtn:SetScript("OnClick", function()
+            OpenEP("Edit Invite Keywords", table.concat(CfgDB().inviteKeywords or {}, "\n"), function(text)
+                local inviteKeywords = {}
                 for line in text:gmatch("([^\n]+)") do
-                    local s=line:match("^%s*(.-)%s*$") if s~="" then MTR.db.inviteKeywords[#MTR.db.inviteKeywords+1]=s end
+                    local s = line:match("^%s*(.-)%s*$")
+                    if s ~= "" then inviteKeywords[#inviteKeywords + 1] = s end
                 end
-                ikDisplay:SetText(Trunc(#MTR.db.inviteKeywords.." keywords saved.", 60))
+                CfgDB().inviteKeywords = inviteKeywords
+                MTR.db = CfgDB()
+                mainWin._dirty = true
+                RefreshGuildTabState()
             end)
         end)
+        y = y - 34
 
-        local note = t:CreateFontString(nil,"OVERLAY","GameFontGreen")
-        note:SetPoint("TOPLEFT", t, "TOPLEFT", LEFT, -378)
+        local note = content:CreateFontString(nil, "OVERLAY", "GameFontGreen")
+        note:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
         note:SetWidth(PANEL_W)
         note:SetJustifyH("LEFT")
         note:SetWordWrap(true)
         note:SetText("Digit-only messages (123, 1...) and short 'ready'/'rdy' are also matched automatically.")
+        y = y - 44
 
-        MakeSep(t,"Whisper Auto-Responder",-416)
-        mainWin._ckAutoReply=MakeCK("AutoRpy",t,"Enable whisper auto-responder",FIELD_X,-444)
-        mainWin._ckAutoReply:SetScript("OnClick",function(s) MTR.db.autoResponderEnabled=s:GetChecked() end)
-        MakeSep(t,"Auto-Responses (trigger|response per line)",-488)
-        local arDisplay=t:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-        arDisplay:SetPoint("TOPLEFT",t,"TOPLEFT",LEFT,-506)
+        MakeSep(content, "Whisper Auto-Responder", y)
+        y = y - 20
+        mainWin._guildAutoReply = MakeCK("AutoRpy", content, "Enable whisper auto-responder", FIELD_X, y)
+        mainWin._guildAutoReply:SetScript("OnClick", function(self) SaveBool("autoResponderEnabled", self:GetChecked()) end)
+        y = y - 40
+
+        MakeSep(content, "Auto-Responses (trigger|response per line)", y)
+        y = y - 20
+        local arDisplay = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        arDisplay:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
         arDisplay:SetWidth(PANEL_W)
         arDisplay:SetWordWrap(true)
         arDisplay:SetJustifyH("LEFT")
         arDisplay:SetText("Loading...")
-        mainWin._arDisplay=arDisplay
-        local arEditBtn=MakeBT(t,"Edit Responses",150,26)
-        arEditBtn:SetPoint("TOPLEFT",t,"TOPLEFT",FIELD_X,-534)
-        arEditBtn:SetScript("OnClick",function()
-            local lines={} for _,rule in ipairs(MTR.db.autoResponses or {}) do if rule.trigger and rule.response then lines[#lines+1]=rule.trigger.."|"..rule.response end end
-            OpenEP("Edit Auto-Responses (trigger|response)",table.concat(lines,"\n"),function(text)
-                MTR.db.autoResponses={}
-                for line in text:gmatch("([^\n]+)") do local tr,resp=line:match("^(.-)%|(.+)$") if tr and resp then tr=tr:match("^%s*(.-)%s*$") resp=resp:match("^%s*(.-)%s*$") if tr~="" then MTR.db.autoResponses[#MTR.db.autoResponses+1]={trigger=tr,response=resp} end end end
-                arDisplay:SetText(Trunc(#MTR.db.autoResponses.." responses saved.",60))
+        mainWin._arDisplay = arDisplay
+        y = y - 28
+
+        local arEditBtn = MakeBT(content, "Edit Responses", 150, 26)
+        arEditBtn:SetPoint("TOPLEFT", content, "TOPLEFT", FIELD_X, y)
+        arEditBtn:SetScript("OnClick", function()
+            local lines = {}
+            for _, rule in ipairs(CfgDB().autoResponses or {}) do
+                if rule.trigger and rule.response then
+                    lines[#lines + 1] = rule.trigger .. "|" .. rule.response
+                end
+            end
+            OpenEP("Edit Auto-Responses (trigger|response)", table.concat(lines, "\n"), function(text)
+                local newResponses = {}
+                for line in text:gmatch("([^\n]+)") do
+                    local tr, resp = line:match("^(.-)%|(.+)$")
+                    if tr and resp then
+                        tr = tr:match("^%s*(.-)%s*$")
+                        resp = resp:match("^%s*(.-)%s*$")
+                        if tr ~= "" then
+                            newResponses[#newResponses + 1] = { trigger = tr, response = resp }
+                        end
+                    end
+                end
+                CfgDB().autoResponses = newResponses
+                MTR.db = CfgDB()
+                mainWin._dirty = true
+                RefreshGuildTabState()
             end)
         end)
+        y = y - 42
 
-        MakeSep(t,"MOTD Templates (key=value)",-578)
-        local motdDisplay=t:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-        motdDisplay:SetPoint("TOPLEFT",t,"TOPLEFT",LEFT,-596)
+        MakeSep(content, "MOTD Templates (key=value)", y)
+        y = y - 20
+        local motdDisplay = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        motdDisplay:SetPoint("TOPLEFT", content, "TOPLEFT", LEFT, y)
         motdDisplay:SetWidth(PANEL_W)
         motdDisplay:SetWordWrap(true)
         motdDisplay:SetJustifyH("LEFT")
         motdDisplay:SetText("Loading...")
-        mainWin._motdDisplay=motdDisplay
-        local motdEditBtn=MakeBT(t,"Edit MOTD Templates",170,26)
-        motdEditBtn:SetPoint("TOPLEFT",t,"TOPLEFT",FIELD_X,-624)
-        motdEditBtn:SetScript("OnClick",function()
-            local lines={} for k,v in pairs(MTR.db.motdTemplates or {}) do lines[#lines+1]=k.."="..v end table.sort(lines)
-            OpenEP("Edit MOTD Templates (key=value)",table.concat(lines,"\n"),function(text)
-                MTR.db.motdTemplates={}
-                for line in text:gmatch("([^\n]+)") do local k,v=line:match("^(.-)=(.+)$") if k and v then k=k:match("^%s*(.-)%s*$") v=v:match("^%s*(.-)%s*$") if k~="" then MTR.db.motdTemplates[k]=v end end end
-                motdDisplay:SetText(Trunc(#lines.." templates saved.",60))
+        mainWin._motdDisplay = motdDisplay
+        y = y - 28
+
+        local motdEditBtn = MakeBT(content, "Edit MOTD Templates", 170, 26)
+        motdEditBtn:SetPoint("TOPLEFT", content, "TOPLEFT", FIELD_X, y)
+        motdEditBtn:SetScript("OnClick", function()
+            local lines = {}
+            for k, v in pairs(CfgDB().motdTemplates or {}) do lines[#lines + 1] = k .. "=" .. v end
+            table.sort(lines)
+            OpenEP("Edit MOTD Templates (key=value)", table.concat(lines, "\n"), function(text)
+                local newTemplates = {}
+                for line in text:gmatch("([^\n]+)") do
+                    local k, v = line:match("^(.-)=(.+)$")
+                    if k and v then
+                        k = k:match("^%s*(.-)%s*$")
+                        v = v:match("^%s*(.-)%s*$")
+                        if k ~= "" then newTemplates[k] = v end
+                    end
+                end
+                CfgDB().motdTemplates = newTemplates
+                MTR.db = CfgDB()
+                mainWin._dirty = true
+                RefreshGuildTabState()
             end)
         end)
-        local arL=t:CreateFontString(nil,"OVERLAY","GameFontNormal")
-        arL:SetPoint("TOPLEFT",t,"TOPLEFT",LEFT,-660)
-        arL:SetWidth(PANEL_W)
-        arL:SetJustifyH("LEFT")
-        arL:SetText("Set MOTD by key:")
-        mainWin._motdKeyEB=MakeIn("MOTDKey",t,180,FIELD_X,-682)
-        local setMotdBtn=MakeBT(t,"Set MOTD",100,22)
-        setMotdBtn:SetPoint("LEFT",mainWin._motdKeyEB,"RIGHT",8,0)
-        setMotdBtn:SetScript("OnClick",function()
+        y = y - 38
+
+        AddLabel("Set MOTD by key:")
+        mainWin._motdKeyEB = MakeIn("MOTDKey", content, 180, FIELD_X, y)
+        local setMotdBtn = MakeBT(content, "Set MOTD", 100, 22)
+        setMotdBtn:SetPoint("LEFT", mainWin._motdKeyEB, "RIGHT", 8, 0)
+        setMotdBtn:SetScript("OnClick", function()
             if not (MTR.isOfficer or MTR.isGM) then MPE("Officers only.") return end
-            local k=(mainWin._motdKeyEB:GetText() or ""):match("^%s*(.-)%s*$") if k=="" then return end
-            local tmpl=MTR.db and MTR.db.motdTemplates and MTR.db.motdTemplates[k]
-            if not tmpl then MP("Unknown template key: "..k) return end
-            GuildSetMOTD(tmpl) MP("MOTD set to '"..k.."' template.")
+            local k = (mainWin._motdKeyEB:GetText() or ""):match("^%s*(.-)%s*$")
+            if k == "" then return end
+            local tmpl = CfgDB().motdTemplates and CfgDB().motdTemplates[k]
+            if not tmpl then MP("Unknown template key: " .. k) return end
+            GuildSetMOTD(tmpl)
+            MP("MOTD set to '" .. k .. "' template.")
         end)
+        y = y - 60
+
+        content:SetHeight(math.abs(y) + 40)
+        mainWin._refreshGuildTab = RefreshGuildTabState
 
         if MTR.AttachTooltip then
             MTR.AttachTooltip(ikEditBtn, "Invite Keywords", "Edit guild-chat keywords that trigger auto-invite.")
@@ -852,6 +1113,7 @@ local function CreateMainWindow()
             MTR.AttachTooltip(setMotdBtn, "Set MOTD", "Apply the template key entered to the live guild MOTD.")
         end
 
+        RefreshGuildTabState()
     end
 
     -- =========================================================================
@@ -859,37 +1121,51 @@ local function CreateMainWindow()
     -- =========================================================================
     tabBuilders["DKP"] = function(t)
         mainWin._ckDKPEnable = MakeCK("DKPEn",t,"Enable DKP system",0,-4)
-        mainWin._ckDKPEnable:SetScript("OnClick",function(s) MTR.db.dkpEnabled=s:GetChecked() end)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckDKPEnable, "dkpEnabled") end
+        mainWin._ckDKPEnable:SetScript("OnClick",function(s) SaveBool("dkpEnabled", s:GetChecked()) end)
 
         local l1=t:CreateFontString(nil,"OVERLAY","GameFontNormal") l1:SetPoint("TOPLEFT",t,"TOPLEFT",0,-38) l1:SetText("DKP per raid attendance:")
         mainWin._slDKPRaid = MakeSL("DKPRaid",t,300,0,-54,0,200,5)
-        mainWin._slDKPRaid:SetScript("OnValueChanged",function(s,v) _G["MekSLv_DKPRaidText"]:SetText(v) if MTR.db then MTR.db.dkpPerRaid=v end end)
+        if Settings then Settings.BindSlider(mainWin, mainWin._slDKPRaid, "dkpPerRaid", {default=10, step=5}) end
+        mainWin._slDKPRaid:SetScript("OnValueChanged",function(s,v) _G["MekSLv_DKPRaidText"]:SetText(v) SaveValue("dkpPerRaid", math.floor(v)) end)
 
         local l2=t:CreateFontString(nil,"OVERLAY","GameFontNormal") l2:SetPoint("TOPLEFT",t,"TOPLEFT",0,-86) l2:SetText("DKP per boss kill:")
         mainWin._slDKPBoss = MakeSL("DKPBoss",t,300,0,-102,0,100,1)
-        mainWin._slDKPBoss:SetScript("OnValueChanged",function(s,v) _G["MekSLv_DKPBossText"]:SetText(v) if MTR.db then MTR.db.dkpPerBoss=v end end)
+        if Settings then Settings.BindSlider(mainWin, mainWin._slDKPBoss, "dkpPerBoss", {default=5, step=1}) end
+        mainWin._slDKPBoss:SetScript("OnValueChanged",function(s,v) _G["MekSLv_DKPBossText"]:SetText(v) SaveValue("dkpPerBoss", math.floor(v)) end)
 
         local l3=t:CreateFontString(nil,"OVERLAY","GameFontNormal") l3:SetPoint("TOPLEFT",t,"TOPLEFT",0,-134) l3:SetText("Default publish channel:")
         local chanDD=CreateFrame("Frame","MekDKPChanDDv",t,"UIDropDownMenuTemplate")
         chanDD:SetPoint("TOPLEFT",t,"TOPLEFT",-4,-148) UIDropDownMenu_SetWidth(chanDD,130)
         mainWin._dkpChanDD=chanDD
+        if Settings then
+            Settings.BindCustom(mainWin, function()
+                if mainWin._dkpChanDD then
+                    UIDropDownMenu_SetSelectedValue(mainWin._dkpChanDD, Settings.Get("dkpPublishChannel", "GUILD"))
+                end
+            end, function()
+                local selected = UIDropDownMenu_GetSelectedValue(mainWin._dkpChanDD)
+                if selected and selected ~= "" then Settings.Set("dkpPublishChannel", selected) end
+            end, "dkpPublishChannel")
+        end
         UIDropDownMenu_Initialize(chanDD,function()
             for _,ch in ipairs({"GUILD","OFFICER","RAID","PARTY","SAY"}) do
                 local info=UIDropDownMenu_CreateInfo()
                 info.text=ch info.value=ch
-                info.func=function() UIDropDownMenu_SetSelectedValue(chanDD,ch) if MTR.db then MTR.db.dkpPublishChannel=ch end if MTR.db then MTR.db.dkpPublishChannel=ch end end
+                info.func=function() UIDropDownMenu_SetSelectedValue(chanDD,ch) SaveValue("dkpPublishChannel", ch) end
                 UIDropDownMenu_AddButton(info)
             end
         end)
 
         mainWin._ckAttAuto = MakeCK("AttAuto",t,"Auto-snapshot attendance on raid zone entry",0,-182)
-        mainWin._ckAttAuto:SetScript("OnClick",function(s) MTR.db.attendanceAutoSnapshot=s:GetChecked() end)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckAttAuto, "attendanceAutoSnapshot") end
+        mainWin._ckAttAuto:SetScript("OnClick",function(s) SaveBool("attendanceAutoSnapshot", s:GetChecked()) end)
 
         MakeSep(t,"Actions",-212)
         local syncBtn = MakeBT(t,"Sync DKP to Raid",160,26) syncBtn:SetPoint("TOP",t,"TOP",-84,-228)
         syncBtn:SetScript("OnClick",function() MTR.DKPSyncToRaid() end)
         local pubBtn = MakeBT(t,"Publish Standings",160,26) pubBtn:SetPoint("LEFT",syncBtn,"RIGHT",8,0)
-        pubBtn:SetScript("OnClick",function() if MTR.db then MTR.DKPPublish(MTR.db.dkpPublishChannel) end end)
+        pubBtn:SetScript("OnClick",function() if CfgDB() then MTR.DKPPublish(CfgDB().dkpPublishChannel) end end)
 
         MakeSep(t,"Officer Actions",-270)
         local actLbl=t:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
@@ -950,7 +1226,7 @@ local function CreateMainWindow()
         lkBtn:SetScript("OnClick",function()
             local n=(mainWin._ledgLookupEB:GetText() or ""):match("^%s*(.-)%s*$")
             if n=="" then return end
-            local hist=MTR.db and MTR.db.dkpLedger[n] and MTR.db.dkpLedger[n].history or {}
+            local hist=CfgDB() and CfgDB().dkpLedger[n] and CfgDB().dkpLedger[n].history or {}
             if #hist==0 then lkDisplay:SetText(n..": No DKP history.") return end
             local lines={n.." — Balance: "..MTR.DKPBalance(n).." pts",""}
             for i=#hist,math.max(1,#hist-49),-1 do
@@ -961,7 +1237,7 @@ local function CreateMainWindow()
         end)
 
         t:SetScript("OnShow", function()
-            if not MTR.db then return end
+            if not CfgDB() then return end
             local standings = MTR.DKPStandings()
             if #standings == 0 then
                 lkDisplay:SetText("No DKP data yet.")
@@ -1014,15 +1290,15 @@ local function CreateMainWindow()
             local b=MakeBT(t,lbl,80,22)
             if aPrev then b:SetPoint("LEFT",aPrev,"RIGHT",4,0)
             else b:SetPoint("TOPLEFT",ahistEB:GetParent(),"BOTTOMLEFT",0,-4) end
-            b:SetScript("OnClick",function() if MTR.db then MTR.ExportHistory(MTR.FormatBidHistory(MTR.db.dkpBidLog),ch) end end)
+            b:SetScript("OnClick",function() if CfgDB() then MTR.ExportHistory(MTR.FormatBidHistory(CfgDB().dkpBidLog),ch) end end)
             aPrev=b
         end
         local aRefBtn=MakeBT(t,"Refresh",90,22) aRefBtn:SetPoint("LEFT",aPrev,"RIGHT",10,0)
         aRefBtn:SetScript("OnClick",function()
-            if not MTR.db then return end
+            if not CfgDB() then return end
             local lines={}
-            for i=#MTR.db.dkpBidLog,math.max(1,#MTR.db.dkpBidLog-99),-1 do
-                local e=MTR.db.dkpBidLog[i]
+            for i=#CfgDB().dkpBidLog,math.max(1,#CfgDB().dkpBidLog-99),-1 do
+                local e=CfgDB().dkpBidLog[i]
                 if e.type=="auction" or not e.type then
                     lines[#lines+1]=string.format("[%s] [%s]  Winner: %s  %d pts",e.date or "?",e.item or "?",e.winner or "?",e.amount or 0)
                 end
@@ -1086,9 +1362,9 @@ local function CreateMainWindow()
             if rPrev then b:SetPoint("LEFT",rPrev,"RIGHT",4,0)
             else b:SetPoint("TOPLEFT",rhistEB:GetParent(),"BOTTOMLEFT",0,-4) end
             b:SetScript("OnClick",function()
-                if MTR.db then
+                if CfgDB() then
                     local rollOnly={}
-                    for _,e in ipairs(MTR.db.dkpBidLog) do if e.type=="roll" then rollOnly[#rollOnly+1]=e end end
+                    for _,e in ipairs(CfgDB().dkpBidLog) do if e.type=="roll" then rollOnly[#rollOnly+1]=e end end
                     MTR.ExportHistory(MTR.FormatBidHistory(rollOnly),ch)
                 end
             end)
@@ -1096,10 +1372,10 @@ local function CreateMainWindow()
         end
         local rRefBtn=MakeBT(t,"Refresh",90,22) rRefBtn:SetPoint("LEFT",rPrev,"RIGHT",10,0)
         rRefBtn:SetScript("OnClick",function()
-            if not MTR.db then return end
+            if not CfgDB() then return end
             local lines={}
-            for i=#MTR.db.dkpBidLog,math.max(1,#MTR.db.dkpBidLog-99),-1 do
-                local e=MTR.db.dkpBidLog[i]
+            for i=#CfgDB().dkpBidLog,math.max(1,#CfgDB().dkpBidLog-99),-1 do
+                local e=CfgDB().dkpBidLog[i]
                 if e.type=="roll" then
                     local winVal = "?"
                     if e.allRolls then
@@ -1127,7 +1403,7 @@ local function CreateMainWindow()
 
         local refSt=MakeBT(t,"Refresh",130,26) refSt:SetPoint("BOTTOMLEFT",t,"BOTTOMLEFT",0,6)
         refSt:SetScript("OnClick",function()
-            if not MTR.db then return end
+            if not CfgDB() then return end
             -- Hide and clear old row Frames (not FontStrings - they can't be re-hidden)
             for _,row in ipairs(mainWin._standRows) do
                 if row.frame then row.frame:Hide() end
@@ -1149,7 +1425,7 @@ local function CreateMainWindow()
                 vBtn:SetPoint("LEFT",rowFrame,"LEFT",490,0)
                 local ename=entry.name
                 vBtn:SetScript("OnClick",function()
-                    local hist=MTR.db.dkpLedger[ename] and MTR.db.dkpLedger[ename].history or {}
+                    local hist=CfgDB().dkpLedger[ename] and CfgDB().dkpLedger[ename].history or {}
                     if #hist==0 then MP(ename..": No history.") return end
                     MP(ename.." DKP history:")
                     for i2=#hist,math.max(1,#hist-14),-1 do
@@ -1162,7 +1438,7 @@ local function CreateMainWindow()
             end
         end)
         local pubSt=MakeBT(t,"Publish",130,26) pubSt:SetPoint("LEFT",refSt,"RIGHT",8,0)
-        pubSt:SetScript("OnClick",function() if MTR.db then MTR.DKPPublish(MTR.db.dkpPublishChannel) end end)
+        pubSt:SetScript("OnClick",function() if CfgDB() then MTR.DKPPublish(CfgDB().dkpPublishChannel) end end)
 
         -- Auto-refresh when the tab is shown
         t:SetScript("OnShow", function() refSt:Click() end)
@@ -1255,7 +1531,7 @@ local function CreateMainWindow()
                                 button1="Kick",button2="Cancel",
                                 OnAccept=function()
                                     GuildUninvite(ename)
-                                    table.insert(MTR.db.inactivityKickLog,{date=date("%Y-%m-%d %H:%M:%S"),player=ename,rank=erank,daysInactive=edays,kickedBy=MTR.playerName})
+                                    table.insert(CfgDB().inactivityKickLog,{date=date("%Y-%m-%d %H:%M:%S"),player=ename,rank=erank,daysInactive=edays,kickedBy=MTR.playerName})
                                     cb:Hide() lbl:Hide() kBtn:Hide() MP("Kicked "..ename)
                                 end,timeout=0,whileDead=true,hideOnEscape=true,
                             }
@@ -1271,9 +1547,11 @@ local function CreateMainWindow()
         wlSelBtn:SetPoint("LEFT", scanBtn, "RIGHT", 4, 0)
         wlSelBtn:SetScript("OnClick",function()
             local added=0
+            local wl = (MTR.GetPathFromTable and MTR.GetPathFromTable(CfgDB(), "inactivityWhitelist", {})) or (CfgDB().inactivityWhitelist or {})
             for _,row in ipairs(mainWin._inactScanRows) do
-                if row.cb and row.cb:GetChecked() then MTR.db.inactivityWhitelist[row.name]=true added=added+1 end
+                if row.cb and row.cb:GetChecked() then wl[row.name]=true added=added+1 end
             end
+            SaveTable("inactivityWhitelist", wl)
             if added>0 then MP("Whitelisted "..added.." player(s).") mainWin._refreshInactiveConfig()
             else MP("No players selected.") end
         end)
@@ -1293,7 +1571,7 @@ local function CreateMainWindow()
                 OnAccept=function()
                     for _,row in ipairs(toKick) do
                         GuildUninvite(row.name)
-                        table.insert(MTR.db.inactivityKickLog,{date=date("%Y-%m-%d %H:%M:%S"),player=row.name,rank="?",daysInactive=0,kickedBy=MTR.playerName})
+                        table.insert(CfgDB().inactivityKickLog,{date=date("%Y-%m-%d %H:%M:%S"),player=row.name,rank="?",daysInactive=0,kickedBy=MTR.playerName})
                         if row.cb    then row.cb:Hide()    end
                         if row.label then row.label:Hide() end
                         if row.kBtn  then row.kBtn:Hide()  end
@@ -1317,7 +1595,8 @@ local function CreateMainWindow()
         ry = ry - 22
 
         mainWin._ckInactEnable = MakeCK("InactEn", t, "Enable inactivity scanning", RX, ry)
-        mainWin._ckInactEnable:SetScript("OnClick",function(s) MTR.db.inactivityEnabled=s:GetChecked() end)
+        if Settings then Settings.BindCheck(mainWin, mainWin._ckInactEnable, "inactivityEnabled") end
+        mainWin._ckInactEnable:SetScript("OnClick",function(s) SaveBool("inactivityEnabled", s:GetChecked()) end)
         ry = ry - 28
 
         local li1 = t:CreateFontString(nil,"OVERLAY","GameFontNormal")
@@ -1325,10 +1604,11 @@ local function CreateMainWindow()
         li1:SetText("Default threshold (days):")
         ry = ry - 16
         mainWin._slInactDays = MakeSL("InactDays", t, RW, RX, ry, 7, 180, 7)
+        if Settings then Settings.BindSlider(mainWin, mainWin._slInactDays, "inactivityDefaultDays", {default=28, step=7}) end
         mainWin._slInactDays:SetScript("OnValueChanged",function(s,v)
             local r=math.floor(v/7)*7
             _G["MekSLv_InactDaysText"]:SetText(r.."d")
-            if MTR.db then MTR.db.inactivityDefaultDays=r end
+            SaveValue("inactivityDefaultDays", r)
         end)
         ry = ry - 34
 
@@ -1358,7 +1638,9 @@ local function CreateMainWindow()
         addWlBtn:SetScript("OnClick",function()
             local n=(mainWin._inactAddWlEB:GetText() or ""):match("^%s*(.-)%s*$")
             if n=="" then return end
-            MTR.db.inactivityWhitelist[n]=true
+            local wl = (MTR.GetPathFromTable and MTR.GetPathFromTable(CfgDB(), "inactivityWhitelist", {})) or (CfgDB().inactivityWhitelist or {})
+            wl[n]=true
+            SaveTable("inactivityWhitelist", wl)
             mainWin._inactAddWlEB:SetText("")
             mainWin._refreshInactiveConfig() MP("Whitelisted: "..n)
         end)
@@ -1367,12 +1649,13 @@ local function CreateMainWindow()
         local wlEditBtn = MakeBT(t,"Edit Whitelist",120,24)
         wlEditBtn:SetPoint("TOPLEFT", t, "TOPLEFT", RX, ry)
         wlEditBtn:SetScript("OnClick",function()
-            local wl={} for n in pairs(MTR.db.inactivityWhitelist) do wl[#wl+1]=n end table.sort(wl)
+            local wl={} for n in pairs(CfgDB().inactivityWhitelist) do wl[#wl+1]=n end table.sort(wl)
             OpenEP("Edit Whitelist",table.concat(wl,"\n"),function(text)
-                MTR.db.inactivityWhitelist={}
+                local newWhitelist={}
                 for line in text:gmatch("([^\n]+)") do
-                    local s=line:match("^%s*(.-)%s*$") if s~="" then MTR.db.inactivityWhitelist[s]=true end
+                    local s=line:match("^%s*(.-)%s*$") if s~="" then newWhitelist[s]=true end
                 end
+                SaveTable("inactivityWhitelist", newWhitelist)
                 mainWin._refreshInactiveConfig() MP("Whitelist updated.")
             end)
         end)
@@ -1399,12 +1682,13 @@ local function CreateMainWindow()
         local srEditBtn = MakeBT(t,"Edit Safe Ranks",130,24)
         srEditBtn:SetPoint("TOPLEFT", t, "TOPLEFT", RX, ry)
         srEditBtn:SetScript("OnClick",function()
-            OpenEP("Edit Safe Ranks",table.concat(MTR.db.inactivitySafeRanks or {},"\n"),function(text)
-                MTR.db.inactivitySafeRanks={}
+            OpenEP("Edit Safe Ranks",table.concat(CfgDB().inactivitySafeRanks or {},"\n"),function(text)
+                local newSafeRanks={}
                 for line in text:gmatch("([^\n]+)") do
                     local s=line:match("^%s*(.-)%s*$")
-                    if s~="" then MTR.db.inactivitySafeRanks[#MTR.db.inactivitySafeRanks+1]=s end
+                    if s~="" then newSafeRanks[#newSafeRanks+1]=s end
                 end
+                SaveTable("inactivitySafeRanks", newSafeRanks)
                 mainWin._refreshInactiveConfig() MP("Safe ranks updated.")
             end)
         end)
@@ -1438,19 +1722,19 @@ local function CreateMainWindow()
                 b:SetPoint("TOPLEFT", t, "TOPLEFT", RX, ry)
             end
             b:SetScript("OnClick",function()
-                if MTR.db then MTR.ExportHistory(MTR.FormatKickHistory(MTR.db.inactivityKickLog), ch) end
+                if CfgDB() then MTR.ExportHistory(MTR.FormatKickHistory(CfgDB().inactivityKickLog), ch) end
             end)
             prevBtnK = b
         end
 
         -- ── Refresh helper ────────────────────────────────────────────────────
         mainWin._refreshInactiveConfig = function()
-            if not MTR.db then return end
-            local wl={} for n in pairs(MTR.db.inactivityWhitelist) do wl[#wl+1]=n end table.sort(wl)
+            if not CfgDB() then return end
+            local wl={} for n in pairs(CfgDB().inactivityWhitelist) do wl[#wl+1]=n end table.sort(wl)
             wlDisplay:SetText(Trunc(#wl>0 and (#wl.." players: "..table.concat(wl,", ")) or "None", 55))
-            srDisplay:SetText(Trunc(table.concat(MTR.db.inactivitySafeRanks or {},", "), 55))
+            srDisplay:SetText(Trunc(table.concat(CfgDB().inactivitySafeRanks or {},", "), 55))
             local kl={}
-            for _,e in ipairs(MTR.db.inactivityKickLog or {}) do
+            for _,e in ipairs(CfgDB().inactivityKickLog or {}) do
                 kl[#kl+1]=string.format("[%s] %s [%s] %s by %s",
                     e.date or "?",e.player or "?",e.rank or "?",
                     MTR.FormatDays(e.daysInactive or 0),e.kickedBy or "?")
@@ -1468,11 +1752,11 @@ local function CreateMainWindow()
 
         -- ── Config accessor ───────────────────────────────────────────────────
         local function GRCfg()
-            if not MTR.db then return (GR and GR.defaultConfig) or {} end
-            if not MTR.db.groupRadarConfig then
-                MTR.db.groupRadarConfig = MTR.DeepCopy(GR and GR.defaultConfig or {})
+            if not CfgDB() then return (GR and GR.defaultConfig) or {} end
+            if not CfgDB().groupRadarConfig then
+                SaveTable("groupRadarConfig", MTR.DeepCopy(GR and GR.defaultConfig or {}))
             end
-            return MTR.db.groupRadarConfig
+            return (MTR.GetPathFromTable and MTR.GetPathFromTable(CfgDB(), "groupRadarConfig", {})) or CfgDB().groupRadarConfig
         end
 
         -- ── Layout constants ──────────────────────────────────────────────────
@@ -1504,7 +1788,7 @@ local function CreateMainWindow()
             ck:SetSize(24,24)
             _G["MekCK_"..name.."Text"]:SetText(label)
             ck:SetScript("OnClick",function(s)
-                GRCfg()[cfgKey]=(s:GetChecked() and true or false)
+                SaveBool("groupRadarConfig."..cfgKey, s:GetChecked())
             end)
             grAllCKs[#grAllCKs+1]={ck=ck,key=cfgKey}
             return ck
@@ -1564,12 +1848,14 @@ local function CreateMainWindow()
         local lbl1=t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl1:SetPoint("TOPLEFT",t,"TOPLEFT",4,-252) lbl1:SetText("Must contain (blank = any):")
         local mustEB=MakeIn("GRMustContain",t,FW,4,-268)
-        mustEB:SetScript("OnTextChanged",function(s) GRCfg().messageMustContain=s:GetText() end)
+        if Settings then Settings.BindEdit(mainWin, mustEB, "groupRadarConfig.messageMustContain") end
+        mustEB:SetScript("OnTextChanged",function(s) SaveValue("groupRadarConfig.messageMustContain", s:GetText() or "") end)
 
         local lbl2=t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl2:SetPoint("TOPLEFT",t,"TOPLEFT",4,-298) lbl2:SetText("Must NOT contain (comma-separated):")
         local mustNotEB=MakeIn("GRMustNotContain",t,FW,4,-314)
-        mustNotEB:SetScript("OnTextChanged",function(s) GRCfg().messageMustNotContain=s:GetText() end)
+        if Settings then Settings.BindEdit(mainWin, mustNotEB, "groupRadarConfig.messageMustNotContain") end
+        mustNotEB:SetScript("OnTextChanged",function(s) SaveValue("groupRadarConfig.messageMustNotContain", s:GetText() or "") end)
 
         -- ┌─────────────────────────────────────────────────────────────────┐
         -- │  SECTION 4 — Timing sliders (y = -348 → -400)                 │
@@ -1579,19 +1865,21 @@ local function CreateMainWindow()
         local lbl3=t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl3:SetPoint("TOPLEFT",t,"TOPLEFT",4,-362) lbl3:SetText("Alert cooldown per player (s):")
         local spamSL=MakeSL("GRSpamCD",t,390,4,-380,30,600,30)
+        if Settings then Settings.BindSlider(mainWin, spamSL, "groupRadarConfig.dontDisplaySpammers", {default=180, step=30}) end
         spamSL:SetScript("OnValueChanged",function(s,v)
             local r=math.floor(v/30)*30
             _G["MekSLv_GRSpamCDText"]:SetText(r.."s")
-            GRCfg().dontDisplaySpammers=r
+            SaveValue("groupRadarConfig.dontDisplaySpammers", r)
         end)
 
         local lbl4=t:CreateFontString(nil,"OVERLAY","GameFontNormal")
         lbl4:SetPoint("TOPLEFT",t,"TOPLEFT",454,-362) lbl4:SetText("Hide recruiter from window after (s):")
         local expirySL=MakeSL("GRExpiry",t,390,454,-380,60,600,60)
+        if Settings then Settings.BindSlider(mainWin, expirySL, "groupRadarConfig.hideFromDetailAfter", {default=180, step=60}) end
         expirySL:SetScript("OnValueChanged",function(s,v)
             local r=math.floor(v/60)*60
             _G["MekSLv_GRExpiryText"]:SetText(r.."s")
-            GRCfg().hideFromDetailAfter=r
+            SaveValue("groupRadarConfig.hideFromDetailAfter", r)
         end)
 
         -- ┌─────────────────────────────────────────────────────────────────┐
@@ -1615,8 +1903,8 @@ local function CreateMainWindow()
 
         -- ── Refresh helper ────────────────────────────────────────────────────
         mainWin._refreshGroupRadarTab = function()
-            if not MTR.db or not MTR.db.groupRadarConfig then return end
-            local cfg=MTR.db.groupRadarConfig
+            if not CfgDB() or not CfgDB().groupRadarConfig then return end
+            local cfg=CfgDB().groupRadarConfig
             for _,entry in ipairs(grAllCKs) do
                 if entry.ck then
                     entry.ck:SetChecked(cfg[entry.key]==true)
@@ -1634,21 +1922,31 @@ local function CreateMainWindow()
     tabBuilt["Recruit"] = true
 
     -- =========================================================================
-    -- REFRESH: populate all widgets from live db
+    -- REFRESH: populate all widgets from current config source
     -- =========================================================================
+
+    local function CommitWidgetState()
+        SnapshotAllConfigWidgets()
+        if MTR.FlushActiveProfile then MTR.FlushActiveProfile() end
+    end
+
+    MTR.CommitConfigState = CommitWidgetState
+
     function mainWin:Refresh()
         if not MTR.initialized or not MTR.db then return end
+        mainWin._refreshing = true
+        if Settings and Settings.LoadWindow then Settings.LoadWindow(mainWin) end
 
         -- Ensure any tab that has been opened is refreshed;
         -- skip widget updates for tabs not yet constructed (lazy).
         if mainWin._kwDisplay then
-        mainWin._kwDisplay:SetText(Trunc((#(MTR.db.keywords or {})).." keywords", 50))
-        mainWin._wtDisplay:SetText(Trunc((#(MTR.db.whisperTemplates or {})).." templates", 50))
-        mainWin._adDisplay:SetText(Trunc((#(MTR.db.adPatterns or {})).." phrases", 50))
+        mainWin._kwDisplay:SetText(Trunc((#(CfgDB().keywords or {})).." keywords", 50))
+        mainWin._wtDisplay:SetText(Trunc((#(CfgDB().whisperTemplates or {})).." templates", 50))
+        mainWin._adDisplay:SetText(Trunc((#(CfgDB().adPatterns or {})).." phrases", 50))
 
         -- Guild Ads refresh
         if mainWin._adPostDisplay then
-            local msgs = MTR.db.guildAdMessages or {}
+            local msgs = CfgDB().guildAdMessages or {}
             local en = 0
             for _, m in ipairs(msgs) do if m.enabled ~= false and m.text ~= "" then en=en+1 end end
             mainWin._adPostDisplay:SetText(#msgs .. " messages (" .. en .. " enabled)")
@@ -1656,11 +1954,11 @@ local function CreateMainWindow()
         if mainWin._adToggleBtn and MTR.GuildAds then
             mainWin._adToggleBtn:SetText(MTR.GuildAds.active and "|cffff4444Stop Posting|r" or "|cff00ff00Start Posting|r")
         end
-        if mainWin._adChanEB and MTR.db.guildAdConfig then
-            mainWin._adChanEB:SetText(tostring(MTR.db.guildAdConfig.channelNum or 1))
+        if mainWin._adChanEB and CfgDB().guildAdConfig then
+            mainWin._adChanEB:SetText(tostring(CfgDB().guildAdConfig.channelNum or 1))
         end
-        if mainWin._adIntBtns and mainWin._adIntervals and MTR.db.guildAdConfig then
-            local curMins = MTR.db.guildAdConfig.intervalMins or 5
+        if mainWin._adIntBtns and mainWin._adIntervals and CfgDB().guildAdConfig then
+            local curMins = CfgDB().guildAdConfig.intervalMins or 5
             for i, btn in ipairs(mainWin._adIntBtns) do
                 if mainWin._adIntervals[i] == curMins then btn:LockHighlight()
                 else btn:UnlockHighlight() end
@@ -1670,7 +1968,7 @@ local function CreateMainWindow()
         if MTR.GuildAds then MTR.GuildAds.UpdateStatusLabel() end
         -- Recruit tab (always built) ─────────────────────────────────────────
         local hl={}
-        local rh = MTR.db.recruitHistory or {}
+        local rh = CfgDB().recruitHistory or {}
         for i = #rh, math.max(1, #rh - 7), -1 do   -- last 8, newest first
             local e = rh[i]
             local recruit = e.recruit or e.player or "?"
@@ -1678,39 +1976,35 @@ local function CreateMainWindow()
             hl[#hl+1] = string.format("[%s]  %-18s  %s", e.time or "?", recruit, sentBy)
         end
         mainWin._recruitHistEB:SetText(#hl>0 and table.concat(hl,"\n") or "No history yet.")
-        if _G["MekCK_RcEnable"]  then _G["MekCK_RcEnable"]:SetChecked(MTR.db.enabled ~= false) end
-        if _G["MekCK_RcGuild"]   then _G["MekCK_RcGuild"]:SetChecked(MTR.db.requireGuildWord ~= false) end
-        if _G["MekCK_RcSound"]   then _G["MekCK_RcSound"]:SetChecked(MTR.db.soundAlert ~= false) end
-        if _G["MekCK_RcMinimap"] then _G["MekCK_RcMinimap"]:SetChecked(MTR.db.minimapButton ~= false) end
-        if _G["MekCK_RcDebug"]   then _G["MekCK_RcDebug"]:SetChecked(MTR.IsDebugEnabled()) end
-        if _G["MekCK_RcIgnAds"]  then _G["MekCK_RcIgnAds"]:SetChecked(MTR.db.ignoreAds ~= false) end
-        if _G["MekIn_AddReq"]    then _G["MekIn_AddReq"]:SetText(MTR.db.additionalRequired or "") end
-        if mainWin._slIgnore   then mainWin._slIgnore:SetValue(MTR.db.ignoreDuration or 300) end
-        if mainWin._slPopW     then mainWin._slPopW:SetValue(MTR.db.popupWidth  or 350) end
-        if mainWin._slPopH     then mainWin._slPopH:SetValue(MTR.db.popupHeight or 180) end
+        if _G["MekCK_RcEnable"]  then _G["MekCK_RcEnable"]:SetChecked(CfgDB().enabled ~= false) end
+        if _G["MekCK_RcGuild"]   then _G["MekCK_RcGuild"]:SetChecked(CfgDB().requireGuildWord ~= false) end
+        if _G["MekCK_RcSound"]   then _G["MekCK_RcSound"]:SetChecked(CfgDB().soundAlert ~= false) end
+        if _G["MekCK_RcMinimap"] then _G["MekCK_RcMinimap"]:SetChecked(CfgDB().minimapButton ~= false) end
+        if _G["MekCK_RcDebug"]   then _G["MekCK_RcDebug"]:SetChecked(CfgDB().enableDebug == true) end
+        if _G["MekCK_RcIgnAds"]  then _G["MekCK_RcIgnAds"]:SetChecked(CfgDB().ignoreAds ~= false) end
+        if _G["MekIn_AddReq"]    then _G["MekIn_AddReq"]:SetText(CfgDB().additionalRequired or "") end
+        if mainWin._slIgnore   then mainWin._slIgnore:SetValue(CfgDB().ignoreDuration or 300) end
+        if mainWin._slPopW     then mainWin._slPopW:SetValue(CfgDB().popupWidth  or 350) end
+        if mainWin._slPopH     then mainWin._slPopH:SetValue(CfgDB().popupHeight or 180) end
         if mainWin._chanChecks then
             for _,ck in ipairs(mainWin._chanChecks) do
-                ck:SetChecked((MTR.db.scanChannels or {})[ck.channel]==true)
+                ck:SetChecked((CfgDB().scanChannels or {})[ck.channel]==true)
             end
         end
 
         -- Guild tab (lazy) ─────────────────────────────────────────────
-        if _G["MekCK_InvEn"]      then _G["MekCK_InvEn"]:SetChecked(MTR.db.enableGuildInvites==true) end
-        if _G["MekCK_InvAnn"]     then _G["MekCK_InvAnn"]:SetChecked(MTR.db.inviteAnnounce==true) end
-        if _G["MekIn_InvWelcome"] then _G["MekIn_InvWelcome"]:SetText(MTR.db.inviteWelcomeMsg or "") end
-        if mainWin._invCDSld  then mainWin._invCDSld:SetValue(MTR.db.inviteCooldown or 60) end
-        if mainWin._ikDisplay then mainWin._ikDisplay:SetText(Trunc((#(MTR.db.inviteKeywords or {})).." keywords", 60)) end
+        if mainWin._refreshGuildTab then mainWin._refreshGuildTab() end
 
         -- DKP tab (lazy) ──────────────────────────────────────────────────────
-        if _G["MekCK_DKPEn"]   then _G["MekCK_DKPEn"]:SetChecked(MTR.db.dkpEnabled ~= false) end
-        if mainWin._slDKPRaid  then mainWin._slDKPRaid:SetValue(MTR.db.dkpPerRaid or 10) end
-        if mainWin._slDKPBoss  then mainWin._slDKPBoss:SetValue(MTR.db.dkpPerBoss or 5) end
-        if _G["MekCK_AttAuto"] then _G["MekCK_AttAuto"]:SetChecked(MTR.db.attendanceAutoSnapshot ~= false) end
-        if mainWin._dkpChanDD  then UIDropDownMenu_SetSelectedValue(mainWin._dkpChanDD, MTR.db.dkpPublishChannel or "GUILD") end
+        if _G["MekCK_DKPEn"]   then _G["MekCK_DKPEn"]:SetChecked(CfgDB().dkpEnabled ~= false) end
+        if mainWin._slDKPRaid  then mainWin._slDKPRaid:SetValue(CfgDB().dkpPerRaid or 10) end
+        if mainWin._slDKPBoss  then mainWin._slDKPBoss:SetValue(CfgDB().dkpPerBoss or 5) end
+        if _G["MekCK_AttAuto"] then _G["MekCK_AttAuto"]:SetChecked(CfgDB().attendanceAutoSnapshot ~= false) end
+        if mainWin._dkpChanDD  then UIDropDownMenu_SetSelectedValue(mainWin._dkpChanDD, CfgDB().dkpPublishChannel or "GUILD") end
 
         -- Inactive tab (lazy) ─────────────────────────────────────────────────
-        if _G["MekCK_InactEn"]            then _G["MekCK_InactEn"]:SetChecked(MTR.db.inactivityEnabled ~= false) end
-        if mainWin._slInactDays           then mainWin._slInactDays:SetValue(MTR.db.inactivityDefaultDays or 28) end
+        if _G["MekCK_InactEn"]            then _G["MekCK_InactEn"]:SetChecked(CfgDB().inactivityEnabled ~= false) end
+        if mainWin._slInactDays           then mainWin._slInactDays:SetValue(CfgDB().inactivityDefaultDays or 28) end
         if mainWin._refreshInactiveConfig then mainWin._refreshInactiveConfig() end
 
         -- Group Radar tab (lazy) ──────────────────────────────────────────────
@@ -1718,7 +2012,7 @@ local function CreateMainWindow()
 
         if mainWin._motdDisplay then
             local motdKeys={}
-            for k in pairs(MTR.db.motdTemplates or {}) do motdKeys[#motdKeys+1]=k end
+            for k in pairs(CfgDB().motdTemplates or {}) do motdKeys[#motdKeys+1]=k end
             mainWin._motdDisplay:SetText(Trunc(#motdKeys>0 and table.concat(motdKeys,", ") or "None", 60))
         end
 
@@ -1730,7 +2024,61 @@ local function CreateMainWindow()
         if mainWin._refreshOfficerRankUI then mainWin._refreshOfficerRankUI() end
         if mainWin._refreshFeatureAccessUI then mainWin._refreshFeatureAccessUI() end
         if mainWin._updateTabAccess then mainWin._updateTabAccess() end
+        mainWin._refreshing = false
     end
+
+    local function ApplyConfigDraft(stayOpen)
+        if not mainWin then return end
+        if CommitGuildTabState then CommitGuildTabState() end
+        SnapshotAllConfigWidgets()
+        if MTR.FlushActiveProfile then MTR.FlushActiveProfile() end
+        mainWin._originalConfig = MTR.DeepCopy(CfgDB() or {})
+        mainWin._dirty = false
+        if mainWin._cfgStatus then mainWin._cfgStatus:SetText("|cff00ff00Settings saved.|r") end
+        if MTR and MTR.MP then MTR.MP("Settings saved.") end
+        if stayOpen then mainWin:Refresh() end
+    end
+
+    local saveBtn = CreateFrame("Button", nil, mainWin, "UIPanelButtonTemplate")
+    saveBtn:SetSize(90, 24)
+    saveBtn:SetPoint("BOTTOMRIGHT", mainWin, "BOTTOMRIGHT", -16, 12)
+    saveBtn:SetText("Save")
+    saveBtn:SetScript("OnClick", function()
+        ApplyConfigDraft(true)
+    end)
+
+    local applyBtn = CreateFrame("Button", nil, mainWin, "UIPanelButtonTemplate")
+    applyBtn:SetSize(90, 24)
+    applyBtn:SetPoint("RIGHT", saveBtn, "LEFT", -8, 0)
+    applyBtn:SetText("Apply")
+    applyBtn:SetScript("OnClick", function() ApplyConfigDraft(true) end)
+
+    local cancelBtn = CreateFrame("Button", nil, mainWin, "UIPanelButtonTemplate")
+    cancelBtn:SetSize(90, 24)
+    cancelBtn:SetPoint("RIGHT", applyBtn, "LEFT", -8, 0)
+    cancelBtn:SetText("Cancel")
+    cancelBtn:SetScript("OnClick", function()
+        if mainWin._dirty and type(mainWin._originalConfig) == "table" and MTR.ReplaceActiveProfile then
+            MTR.ReplaceActiveProfile(MTR.DeepCopy(mainWin._originalConfig))
+            if MTR.FlushActiveProfile then MTR.FlushActiveProfile() end
+        end
+        mainWin._dirty = false
+        mainWin:Hide()
+    end)
+
+    local cfgStatus = mainWin:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    cfgStatus:SetPoint("BOTTOMLEFT", mainWin, "BOTTOMLEFT", 16, 18)
+    cfgStatus:SetText("|cffaaaaaaClick Save or Apply to commit settings. Save keeps this window open. Cancel restores the values from when you opened the window.|r")
+    mainWin._cfgStatus = cfgStatus
+
+    mainWin:SetScript("OnHide", function()
+        mainWin._dirty = false
+        mainWin._originalConfig = nil
+        mainWin._refreshing = false
+        if mainWin._cfgStatus then
+            mainWin._cfgStatus:SetText("|cffaaaaaaClick Save or Apply to commit settings. Save keeps this window open. Cancel restores the values from when you opened the window.|r")
+        end
+    end)
 
     ShowTab("Recruit")
     MTR.mainWin = mainWin
@@ -1804,7 +2152,10 @@ function MTR.OpenConfig()
 
     CreateMainWindow()
     if mainWin:IsShown() then mainWin:Hide() return end
-    if MTR.initialized and MTR.db then mainWin:Refresh() end
+    mainWin._originalConfig = MTR.DeepCopy(MTR.db or {})
+    mainWin._dirty = false
+    if mainWin._cfgStatus then mainWin._cfgStatus:SetText("|cffaaaaaaClick Save or Apply to commit settings. Save keeps this window open. Cancel restores the values from when you opened the window.|r") end
+    if MTR.initialized and CfgDB() then mainWin:Refresh() end
 
     if mainWin._updateTabAccess then mainWin._updateTabAccess() end
 

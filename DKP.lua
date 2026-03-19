@@ -185,16 +185,17 @@ if RegisterAddonMessagePrefix then RegisterAddonMessagePrefix(DH_PREFIX) end
 local function StripRealm(s) return (s or ""):match("^([^%-]+)") or (s or "") end
 
 local function EnsureDKPSyncState()
-    MekTownRecruitDB = MekTownRecruitDB or {}
-    MekTownRecruitDB.syncState = MekTownRecruitDB.syncState or {}
-    MekTownRecruitDB.syncState.dkp = MekTownRecruitDB.syncState.dkp or {
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or nil
+    if not gs then return { revision = 0, hash = "0", lastFullSyncAt = 0, lastFullSyncFrom = "", lastAckByPeer = {} } end
+    gs.syncState = gs.syncState or {}
+    gs.syncState.dkp = gs.syncState.dkp or {
         revision = 0,
         hash = "0",
         lastFullSyncAt = 0,
         lastFullSyncFrom = "",
         lastAckByPeer = {},
     }
-    return MekTownRecruitDB.syncState.dkp
+    return gs.syncState.dkp
 end
 
 local function SanitizeField(v)
@@ -374,22 +375,22 @@ local function DHFlushQueue()
     if not (MTR.isOfficer or MTR.isGM) then dhQueue = {} return end
     if not IsInGuild()    then dhQueue = {} return end
 
-    SendAddonMessage(DH_PREFIX, "DH:S:" .. (MTR.playerName or ""), "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(DH_PREFIX, "DH:S:" .. (MTR.playerName or "")) else SendAddonMessage(DH_PREFIX, "DH:S:" .. (MTR.playerName or ""), "GUILD") end
 
     local chunk = ""
     for _, item in ipairs(dhQueue) do
         local encoded = DHEncodeEntry(item.playerName, item.entry)
         if #chunk + #encoded + 1 > 200 then
-            SendAddonMessage(DH_PREFIX, "DH:D:" .. chunk, "GUILD")
+            if MTR.SendGuildScoped then MTR.SendGuildScoped(DH_PREFIX, "DH:D:" .. chunk) else SendAddonMessage(DH_PREFIX, "DH:D:" .. chunk, "GUILD") end
             chunk = encoded
         else
             chunk = chunk == "" and encoded or (chunk .. "," .. encoded)
         end
     end
     if chunk ~= "" then
-        SendAddonMessage(DH_PREFIX, "DH:D:" .. chunk, "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(DH_PREFIX, "DH:D:" .. chunk) else SendAddonMessage(DH_PREFIX, "DH:D:" .. chunk, "GUILD") end
     end
-    SendAddonMessage(DH_PREFIX, "DH:E", "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(DH_PREFIX, "DH:E") else SendAddonMessage(DH_PREFIX, "DH:E", "GUILD") end
 
     MTR.dprint("[DH Sync] Flushed", #dhQueue, "history entries to guild.")
     dhQueue = {}
@@ -404,23 +405,24 @@ dhAddonFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= DH_PREFIX then return end
     if not MTR.initialized or not MTR.db then return end
 
-    local senderName = StripRealm(sender)
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, true)) or message, StripRealm(sender)
+    if not unpacked then return end
     if senderName == MTR.playerName then return end  -- ignore own echo
 
-    if message:sub(1, 5) == "DH:S:" then
+    if unpacked:sub(1, 5) == "DH:S:" then
         dhRecvBuf    = {}
-        dhRecvSender = message:sub(6)
+        dhRecvSender = unpacked:sub(6)
         if dhRecvSender == "" then dhRecvSender = senderName end
 
-    elseif message:sub(1, 5) == "DH:D:" and dhRecvBuf then
-        for token in message:sub(6):gmatch("[^,]+") do
+    elseif unpacked:sub(1, 5) == "DH:D:" and dhRecvBuf then
+        for token in unpacked:sub(6):gmatch("[^,]+") do
             local decoded = DHDecodeEntry(token)
             if decoded then
                 dhRecvBuf[#dhRecvBuf + 1] = decoded
             end
         end
 
-    elseif message == "DH:E" and dhRecvBuf then
+    elseif unpacked == "DH:E" and dhRecvBuf then
         local merged = 0
         for _, item in ipairs(dhRecvBuf) do
             if DHMergeEntry(item.playerName, item.entry) then
@@ -464,21 +466,21 @@ MTR.DKPSyncToRaidSafe = function()
     end
 
     -- ── Balance broadcast ──────────────────────────────────────────────────
-    SendAddonMessage(DKP_ADDON_PREFIX, "DKP:S", "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(DKP_ADDON_PREFIX, "DKP:S") else SendAddonMessage(DKP_ADDON_PREFIX, "DKP:S", "GUILD") end
     local chunk = ""
     for _, entry in ipairs(standings) do
         local token = entry.name .. ":" .. entry.balance
         if #chunk + #token + 1 > 200 then
-            SendAddonMessage(DKP_ADDON_PREFIX, "DKP:D:" .. chunk, "GUILD")
+            if MTR.SendGuildScoped then MTR.SendGuildScoped(DKP_ADDON_PREFIX, "DKP:D:" .. chunk) else SendAddonMessage(DKP_ADDON_PREFIX, "DKP:D:" .. chunk, "GUILD") end
             chunk = token
         else
             chunk = chunk == "" and token or (chunk .. "," .. token)
         end
     end
     if chunk ~= "" then
-        SendAddonMessage(DKP_ADDON_PREFIX, "DKP:D:" .. chunk, "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(DKP_ADDON_PREFIX, "DKP:D:" .. chunk) else SendAddonMessage(DKP_ADDON_PREFIX, "DKP:D:" .. chunk, "GUILD") end
     end
-    SendAddonMessage(DKP_ADDON_PREFIX, "DKP:E:" .. (MTR.playerName or ""), "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(DKP_ADDON_PREFIX, "DKP:E:" .. (MTR.playerName or "")) else SendAddonMessage(DKP_ADDON_PREFIX, "DKP:E:" .. (MTR.playerName or ""), "GUILD") end
     MTR.MP("[DKP Sync] Sent " .. #standings .. " balances to online guild members.")
 
     -- ── History broadcast (flush queued new entries) ───────────────────────
@@ -497,21 +499,22 @@ syncAddonFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= DKP_ADDON_PREFIX then return end
     if not MTR.initialized or not MTR.db then return end
 
-    local senderName = StripRealm(sender)
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, true)) or message, StripRealm(sender)
+    if not unpacked then return end
     if senderName == MTR.playerName then return end  -- ignore own echo
 
-    if message == "DKP:S" then
+    if unpacked == "DKP:S" then
         syncBuf    = {}
         syncSender = senderName
 
-    elseif message:sub(1, 6) == "DKP:D:" and syncBuf then
-        for token in message:sub(7):gmatch("[^,]+") do
+    elseif unpacked:sub(1, 6) == "DKP:D:" and syncBuf then
+        for token in unpacked:sub(7):gmatch("[^,]+") do
             local n, b = token:match("^(.+):(-?%d+)$")
             if n and b then syncBuf[n] = tonumber(b) end
         end
 
-    elseif message:sub(1, 6) == "DKP:E:" and syncBuf then
-        local from = message:sub(7)
+    elseif unpacked:sub(1, 6) == "DKP:E:" and syncBuf then
+        local from = unpacked:sub(7)
         if from ~= "" then syncSender = from end
 
         -- Merge: update balances only; never delete local entries.
@@ -555,19 +558,19 @@ lsFrame:RegisterEvent("CHAT_MSG_ADDON")
 
 local function SendChunked(prefix, header, payload)
     if header then
-        SendAddonMessage(prefix, header, "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(prefix, header) else SendAddonMessage(prefix, header, "GUILD") end
     end
     payload = payload or ""
     local maxChunk = 200
     local idx = 1
     while idx <= #payload do
-        SendAddonMessage(prefix, "LS:D:" .. payload:sub(idx, idx + maxChunk - 1), "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(prefix, "LS:D:" .. payload:sub(idx, idx + maxChunk - 1)) else SendAddonMessage(prefix, "LS:D:" .. payload:sub(idx, idx + maxChunk - 1), "GUILD") end
         idx = idx + maxChunk
     end
     if payload == "" then
-        SendAddonMessage(prefix, "LS:D:", "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(prefix, "LS:D:") else SendAddonMessage(prefix, "LS:D:", "GUILD") end
     end
-    SendAddonMessage(prefix, "LS:END", "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(prefix, "LS:END") else SendAddonMessage(prefix, "LS:END", "GUILD") end
 end
 
 function MTR.DKPSendFullSnapshot(reason)
@@ -595,9 +598,11 @@ end
 function MTR.DKPRequestFullSync()
     if not MTR.initialized or not IsInGuild() then return false end
     local st = EnsureSyncStateFresh()
-    SendAddonMessage(LS_PREFIX, string.format("LS:REQ:%s:%s",
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(LS_PREFIX, string.format("LS:REQ:%s:%s",
         SanitizeField(MTR.playerName or ""),
-        SanitizeField(st.hash or "0")), "GUILD")
+        SanitizeField(st.hash or "0"))) else SendAddonMessage(LS_PREFIX, string.format("LS:REQ:%s:%s",
+        SanitizeField(MTR.playerName or ""),
+        SanitizeField(st.hash or "0")), "GUILD") end
     MTR.dprint("[DKP Snapshot] Requested full sync. Known hash:", st.hash or "0")
     return true
 end
@@ -617,11 +622,12 @@ lsFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= LS_PREFIX then return end
     if not MTR.initialized or not MTR.db then return end
 
-    local senderName = StripRealm(sender)
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, true)) or message, StripRealm(sender)
+    if not unpacked then return end
     if senderName == MTR.playerName then return end
 
-    if message:sub(1, 7) == "LS:REQ:" then
-        local requester, peerHash = message:match("^LS:REQ:([^:]+):(.+)$")
+    if unpacked:sub(1, 7) == "LS:REQ:" then
+        local requester, peerHash = unpacked:match("^LS:REQ:([^:]+):(.+)$")
         requester = requester or senderName
         local st = EnsureSyncStateFresh()
         if MTR.isOfficer and requester ~= (MTR.playerName or "") and (peerHash or "0") ~= (st.hash or "0") then
@@ -629,9 +635,9 @@ lsFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
             MTR.DKPSendFullSnapshot("peer-request")
         end
 
-    elseif message:sub(1, 7) == "LS:MET:" then
+    elseif unpacked:sub(1, 7) == "LS:MET:" then
         local src, rev, hash, playerCount, entryCount =
-            message:match("^LS:MET:([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$")
+            unpacked:match("^LS:MET:([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$")
         lsRecv = {
             sender = src ~= "" and src or senderName,
             revision = tonumber(rev) or 0,
@@ -641,10 +647,10 @@ lsFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
             chunks = {},
         }
 
-    elseif message:sub(1, 5) == "LS:D:" and lsRecv then
-        lsRecv.chunks[#lsRecv.chunks + 1] = message:sub(6)
+    elseif unpacked:sub(1, 5) == "LS:D:" and lsRecv then
+        lsRecv.chunks[#lsRecv.chunks + 1] = unpacked:sub(6)
 
-    elseif message == "LS:END" and lsRecv then
+    elseif unpacked == "LS:END" and lsRecv then
         local raw = table.concat(lsRecv.chunks, "")
         local receivedHash = MTR.Hash(raw)
         if receivedHash ~= (lsRecv.hash or "0") then
@@ -664,17 +670,20 @@ lsFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
         st.entryCount = entries
         st.lastFullSyncAt = time()
         st.lastFullSyncFrom = lsRecv.sender or ""
-        SendAddonMessage(LS_PREFIX, string.format("LS:ACK:%s:%s:%d",
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(LS_PREFIX, string.format("LS:ACK:%s:%s:%d",
             SanitizeField(MTR.playerName or ""),
             receivedHash,
-            tonumber(st.revision) or 0), "GUILD")
+            tonumber(st.revision) or 0)) else SendAddonMessage(LS_PREFIX, string.format("LS:ACK:%s:%s:%d",
+            SanitizeField(MTR.playerName or ""),
+            receivedHash,
+            tonumber(st.revision) or 0), "GUILD") end
         MTR.MP(string.format(
             "[DKP Snapshot] Applied rev %d from %s (%d player(s), %d history entries).",
             tonumber(lsRecv.revision) or 0, lsRecv.sender or "?", players, entries))
         lsRecv = nil
 
-    elseif message:sub(1, 7) == "LS:ACK:" then
-        local peer, hash, rev = message:match("^LS:ACK:([^:]+):([^:]+):([^:]+)$")
+    elseif unpacked:sub(1, 7) == "LS:ACK:" then
+        local peer, hash, rev = unpacked:match("^LS:ACK:([^:]+):([^:]+):([^:]+)$")
         local st = EnsureSyncStateFresh()
         if hash == (st.hash or "0") then
             st.lastAckByPeer = st.lastAckByPeer or {}

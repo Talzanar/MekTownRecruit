@@ -20,20 +20,21 @@ local function RHBroadcast(recruit, sentBy, timestamp)
     local msg = "RECRUIT_INV:" .. recruit .. "|" .. sentBy .. "|" .. timestamp
     -- Send to GUILD so all online officers receive it regardless of raid status
     if IsInGuild() then
-        SendAddonMessage(RH_PREFIX, msg, "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(RH_PREFIX, msg) else SendAddonMessage(RH_PREFIX, msg, "GUILD") end
     end
 end
 
 local function RHMerge(recruit, sentBy, timestamp)
     if not MTR.db then return end
     -- Avoid duplicates: skip if exact same recruit+sentBy+time already stored
-    local hist = MTR.db.recruitHistory
+    local hist = (MTR.GetGuildStore and MTR.GetGuildStore(true).recruitHistory) or MTR.db.recruitHistory
     for _, e in ipairs(hist) do
         if e.recruit == recruit and e.sentBy == sentBy and e.time == timestamp then
             return
         end
     end
     table.insert(hist, { recruit=recruit, sentBy=sentBy, time=timestamp })
+    if MTR.AppendGuildEvent then MTR.AppendGuildEvent("recruit", "contact", table.concat({recruit or "", sentBy or "", timestamp or ""}, "|")) end
     -- Keep newest at end; cap at 500 entries
     if #hist > 500 then tremove(hist, 1) end
 end
@@ -423,16 +424,28 @@ end)
 -- ============================================================================
 -- GUILD AUTO-INVITE
 -- ============================================================================
+local function IsGuildInviteEnabled()
+    return MTR.GetGuildInviteEnabled and MTR.GetGuildInviteEnabled() == true
+end
+
+local function IsGuildInviteAnnounceEnabled()
+    return MTR.GetGuildInviteAnnounceEnabled and MTR.GetGuildInviteAnnounceEnabled() == true
+end
+
 local inviteFrame = CreateFrame("Frame")
 inviteFrame:RegisterEvent("CHAT_MSG_GUILD")
 inviteFrame:SetScript("OnEvent", function(self, event, message, sender)
     if not MTR.initialized or not MTR.db then return end
-    if MTR.db.enableGuildInvites ~= true then return end
-    if sender == MTR.playerName then return end
+    if IsGuildInviteEnabled() ~= true then return end
+    if type(sender) ~= "string" or sender == "" or sender == MTR.playerName then return end
+    if type(message) ~= "string" or message == "" then return end
     if not MTR.CanInvite() then return end
-    if MTR.recentInvites[sender] and (GetTime() - MTR.recentInvites[sender]) < MTR.db.inviteCooldown then return end
 
-    local lower = message:lower()
+    local cooldown = tonumber(MTR.db.inviteCooldown) or 60
+    if cooldown < 0 then cooldown = 0 end
+    if MTR.recentInvites[sender] and (GetTime() - MTR.recentInvites[sender]) < cooldown then return end
+
+    local lower = string.lower(message)
 
     -- Only proceed if message matches configured invite keywords.
     -- No bypass for short messages — the bypass was causing invites to fire
@@ -441,10 +454,15 @@ inviteFrame:SetScript("OnEvent", function(self, event, message, sender)
 
     MTR.recentInvites[sender] = GetTime()
     InviteUnit(sender)
-    if MTR.db.inviteAnnounce == true then
-        MTR.SendChatSafe(sender .. " has been invited to the raid/party.", "GUILD")
+    if IsGuildInviteAnnounceEnabled() == true then
+        local announceMsg = sender .. " has been invited to the raid/party."
+        MTR.After(0.2, function()
+            if IsGuildInviteAnnounceEnabled() == true then
+                MTR.SendChatSafe(announceMsg, "GUILD")
+            end
+        end)
     end
-    MTR.dprint("Auto-invited:", sender)
+    MTR.dprint("Auto-invited:", sender, "enabled=", tostring(MTR.db and MTR.db.enableGuildInvites), "announce=", tostring(MTR.db and MTR.db.inviteAnnounce))
 end)
 
 
@@ -462,6 +480,13 @@ local function ExtractGuildJoinName(message)
         "^(.+) joins the guild%.$",
         "^(.+) joins the guild$",
     }
+
+    local lower = string.lower(message)
+    if lower:find("joined the party", 1, true) or lower:find("joins the party", 1, true)
+        or lower:find("joined the raid", 1, true) or lower:find("joins the raid", 1, true)
+        or lower:find("joined your group", 1, true) or lower:find("joins your group", 1, true) then
+        return nil
+    end
 
     for _, pat in ipairs(patterns) do
         local name = message:match(pat)

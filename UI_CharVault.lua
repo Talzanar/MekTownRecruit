@@ -807,7 +807,7 @@ local function BuildGuildBank(t)
         t._mode = t._mode or "Inventory"
         t._query = t._query or ""
         t._category = t._category or "All"
-        t._range = t._range or ((MekTownRecruitDB.guildBankLedger and MekTownRecruitDB.guildBankLedger.meta and MekTownRecruitDB.guildBankLedger.meta.uiRange) or "1d")
+        t._range = t._range or (((MTR.GetGuildStore and MTR.GetGuildStore(true).guildBankLedger) or MekTownRecruitDB.guildBankLedger) and (((MTR.GetGuildStore and MTR.GetGuildStore(true).guildBankLedger) or MekTownRecruitDB.guildBankLedger).meta) and ((((MTR.GetGuildStore and MTR.GetGuildStore(true).guildBankLedger) or MekTownRecruitDB.guildBankLedger).meta.uiRange)) or "1d")
 
         local top = CreateFrame("Frame", nil, t)
         top:SetPoint("TOPLEFT", t, "TOPLEFT", 0, 0)
@@ -895,9 +895,10 @@ local function BuildGuildBank(t)
                 info.func = function()
                     if t._mode == "Ledger" then
                         t._range = opt.value
-                        MekTownRecruitDB.guildBankLedger = MekTownRecruitDB.guildBankLedger or { entries = {}, meta = {} }
-                        MekTownRecruitDB.guildBankLedger.meta = MekTownRecruitDB.guildBankLedger.meta or {}
-                        MekTownRecruitDB.guildBankLedger.meta.uiRange = t._range
+                        local _gbl=((MTR.GetGuildStore and MTR.GetGuildStore(true).guildBankLedger) or MekTownRecruitDB.guildBankLedger or { entries = {}, meta = {} })
+                        _gbl.meta = _gbl.meta or {}
+                        _gbl.meta.uiRange = t._range
+                        MekTownRecruitDB.guildBankLedger = _gbl
                     else
                         t._category = opt.value
                     end
@@ -933,9 +934,10 @@ local function BuildGuildBank(t)
             b:SetText(opt.text)
             b:SetScript("OnClick", function()
                 t._range = opt.key
-                MekTownRecruitDB.guildBankLedger = MekTownRecruitDB.guildBankLedger or { entries = {}, meta = {} }
-                MekTownRecruitDB.guildBankLedger.meta = MekTownRecruitDB.guildBankLedger.meta or {}
-                MekTownRecruitDB.guildBankLedger.meta.uiRange = t._range
+                local _gbl=((MTR.GetGuildStore and MTR.GetGuildStore(true).guildBankLedger) or MekTownRecruitDB.guildBankLedger or { entries = {}, meta = {} })
+                _gbl.meta = _gbl.meta or {}
+                _gbl.meta.uiRange = t._range
+                MekTownRecruitDB.guildBankLedger = _gbl
                 UIDropDownMenu_SetSelectedValue(dd, opt.key)
                 UIDropDownMenu_SetText(dd, ({ ["1d"]="Last 24 hours", ["3d"]="Last 3 days", ["7d"]="Last 7 days", ["14d"]="Last 14 days", ["30d"]="Last 30 days", ["all"]="All stored" })[opt.key] or opt.text)
                 if t._refresh then t._refresh() end
@@ -994,8 +996,9 @@ local function BuildGuildBank(t)
         t._content = c
     end
 
-    local bank = MekTownRecruitDB.guildBank or {}
-    local ledger = (MekTownRecruitDB.guildBankLedger and MekTownRecruitDB.guildBankLedger.entries) or {}
+    local _gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or MekTownRecruitDB
+    local bank = _gs.guildBank or MekTownRecruitDB.guildBank or {}
+    local ledger = ((_gs.guildBankLedger or MekTownRecruitDB.guildBankLedger) and ((_gs.guildBankLedger or MekTownRecruitDB.guildBankLedger).entries)) or {}
     local meta = MTR.GuildBankLedger and MTR.GuildBankLedger.GetMeta and MTR.GuildBankLedger.GetMeta() or {}
 
     if t._mode == "Ledger" then

@@ -423,11 +423,11 @@ local function BroadcastGuildBank(items, scannedBy)
     if not IsInGuild() then return end
     local chunks = BuildChunks(items)
     local ts     = date("%Y-%m-%d %H:%M")
-    SendAddonMessage(GB_PREFIX, "GB:S:" .. (scannedBy or ""), "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, "GB:S:" .. (scannedBy or "")) else SendAddonMessage(GB_PREFIX, "GB:S:" .. (scannedBy or ""), "GUILD") end
     for _, chunk in ipairs(chunks) do
-        SendAddonMessage(GB_PREFIX, "GB:D:" .. chunk, "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, "GB:D:" .. chunk) else SendAddonMessage(GB_PREFIX, "GB:D:" .. chunk, "GUILD") end
     end
-    SendAddonMessage(GB_PREFIX, "GB:E:" .. ts, "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, "GB:E:" .. ts) else SendAddonMessage(GB_PREFIX, "GB:E:" .. ts, "GUILD") end
     MTR.dprint("GuildBank broadcast:", #items, "items,", #chunks, "chunks")
 end
 
@@ -549,10 +549,12 @@ GBL.MAX_ENTRIES = 5000
 local gblRecvBuf = nil
 
 local function GBL_DB()
-    MekTownRecruitDB.guildBankLedger = MekTownRecruitDB.guildBankLedger or { entries = {}, meta = {} }
-    MekTownRecruitDB.guildBankLedger.entries = MekTownRecruitDB.guildBankLedger.entries or {}
-    MekTownRecruitDB.guildBankLedger.meta = MekTownRecruitDB.guildBankLedger.meta or {}
-    return MekTownRecruitDB.guildBankLedger
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or MekTownRecruitDB
+    gs.guildBankLedger = gs.guildBankLedger or { entries = {}, meta = {} }
+    gs.guildBankLedger.entries = gs.guildBankLedger.entries or {}
+    gs.guildBankLedger.meta = gs.guildBankLedger.meta or {}
+    MekTownRecruitDB.guildBankLedger = gs.guildBankLedger
+    return gs.guildBankLedger
 end
 
 local function GBL_DebugEnabled()
@@ -793,11 +795,11 @@ local function GBL_Broadcast(entries, sourceTag)
     local chunks = GBL_BuildChunks(entries)
     local who = MTR.playerName or "?"
     local ts = date("%Y-%m-%d %H:%M")
-    SendAddonMessage(GBL_PREFIX, "GL:S:" .. who .. ":" .. tostring(#entries) .. ":" .. sourceTag .. ":" .. ts, "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:S:" .. who .. ":" .. tostring(#entries) .. ":" .. sourceTag .. ":" .. ts) else SendAddonMessage(GBL_PREFIX, "GL:S:" .. who .. ":" .. tostring(#entries) .. ":" .. sourceTag .. ":" .. ts, "GUILD") end
     for _, chunk in ipairs(chunks) do
-        SendAddonMessage(GBL_PREFIX, "GL:D:" .. chunk, "GUILD")
+        if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:D:" .. chunk) else SendAddonMessage(GBL_PREFIX, "GL:D:" .. chunk, "GUILD") end
     end
-    SendAddonMessage(GBL_PREFIX, "GL:E:" .. ts, "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:E:" .. ts) else SendAddonMessage(GBL_PREFIX, "GL:E:" .. ts, "GUILD") end
 end
 
 local gblScanState = {
@@ -1163,7 +1165,7 @@ end
 
 function GBL.RequestSync()
     if not IsInGuild() then return end
-    SendAddonMessage(GBL_PREFIX, "GL:R:" .. (MTR.playerName or "?"), "GUILD")
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:R:" .. (MTR.playerName or "?")) else SendAddonMessage(GBL_PREFIX, "GL:R:" .. (MTR.playerName or "?"), "GUILD") end
 end
 
 function GBL.BeginLocalScan(scanBy)

@@ -66,6 +66,7 @@ function MTR.OpenMemberWindow()
         sep:SetPoint("TOPRIGHT",memberWin,"TOPRIGHT",-10,-40)
 
         local TAB_NAMES = {"Group Radar","Loot","DKP","Standings"}
+        local TAB_DISPLAY_NAMES = { ["Group Radar"] = "Home" }
         local tabBtns, tabFrames, tabBuilt, tabBuilders = {}, {}, {}, {}
         local TAB_BTN_W, TAB_BTN_H, TAB_BTN_GAP = 116, 24, 4
 
@@ -119,7 +120,7 @@ function MTR.OpenMemberWindow()
             else
                 btn:SetPoint("LEFT",tabBtns[i-1],"RIGHT",TAB_BTN_GAP,0)
             end
-            btn:SetText(tname)
+            btn:SetText(TAB_DISPLAY_NAMES[tname] or tname)
             btn:SetScript("OnClick", function() ShowMemberTab(tname) end)
             tabBtns[i] = btn
         end
@@ -129,9 +130,15 @@ function MTR.OpenMemberWindow()
             local defaults = (GR and GR.defaultConfig) or {}
             if not MTR.db then return end
             if not MTR.db.groupRadarConfig then
-                if MTR.DeepCopy then MTR.db.groupRadarConfig = MTR.DeepCopy(defaults) else MTR.db.groupRadarConfig = {} end
+                if MTR.SetProfilePath then
+                    MTR.SetProfilePath("groupRadarConfig", (MTR.DeepCopy and MTR.DeepCopy(defaults)) or {})
+                elseif MTR.DeepCopy then
+                    MTR.db.groupRadarConfig = MTR.DeepCopy(defaults)
+                else
+                    MTR.db.groupRadarConfig = {}
+                end
             end
-            local cfg = MTR.db.groupRadarConfig
+            local cfg = (MTR.GetProfilePath and MTR.GetProfilePath("groupRadarConfig", {})) or MTR.db.groupRadarConfig
             for k,v in pairs(defaults) do
                 if cfg[k] == nil then cfg[k] = v end
             end
@@ -154,11 +161,18 @@ function MTR.OpenMemberWindow()
 
                 if force or (cfg._memberPresetApplied ~= true and untouched) then
                     for key, val in pairs(recommended) do
-                        cfg[key] = val
+                        if MTR.SetProfilePath then MTR.SetProfilePath("groupRadarConfig."..key, val) else cfg[key] = val end
                     end
-                    if cfg.messageMustContain == nil then cfg.messageMustContain = "" end
-                    if cfg.messageMustNotContain == nil then cfg.messageMustNotContain = "" end
-                    cfg._memberPresetApplied = true
+                    if MTR.SetProfilePath then
+                        if cfg.messageMustContain == nil then MTR.SetProfilePath("groupRadarConfig.messageMustContain", "") end
+                        if cfg.messageMustNotContain == nil then MTR.SetProfilePath("groupRadarConfig.messageMustNotContain", "") end
+                        MTR.SetProfilePath("groupRadarConfig._memberPresetApplied", true)
+                        cfg = MTR.GetProfilePath("groupRadarConfig", cfg) or cfg
+                    else
+                        if cfg.messageMustContain == nil then cfg.messageMustContain = "" end
+                        if cfg.messageMustNotContain == nil then cfg.messageMustNotContain = "" end
+                        cfg._memberPresetApplied = true
+                    end
                 end
             end
 
@@ -217,7 +231,12 @@ function MTR.OpenMemberWindow()
                 fs:SetPoint("LEFT", ck, "RIGHT", 2, 1)
                 fs:SetText(text)
                 ck:SetScript("OnClick", function(self)
-                    cfg[key] = self:GetChecked() and true or false
+                    if MTR.SetProfilePathBoolean then
+                        MTR.SetProfilePathBoolean("groupRadarConfig."..key, self:GetChecked())
+                        cfg = MTR.GetProfilePath("groupRadarConfig", cfg) or cfg
+                    else
+                        cfg[key] = self:GetChecked() and true or false
+                    end
                 end)
                 return ck
             end
@@ -259,7 +278,12 @@ function MTR.OpenMemberWindow()
             mustEB:SetAutoFocus(false)
             mustEB:SetText(cfg.messageMustContain or "")
             mustEB:SetScript("OnTextChanged", function(self)
-                cfg.messageMustContain = self:GetText() or ""
+                if MTR.SetProfilePath then
+                    MTR.SetProfilePath("groupRadarConfig.messageMustContain", self:GetText() or "")
+                    cfg = MTR.GetProfilePath("groupRadarConfig", cfg) or cfg
+                else
+                    cfg.messageMustContain = self:GetText() or ""
+                end
             end)
 
             local blockLbl=f:CreateFontString(nil,"OVERLAY","GameFontNormal")
@@ -271,7 +295,12 @@ function MTR.OpenMemberWindow()
             blockEB:SetAutoFocus(false)
             blockEB:SetText(cfg.messageMustNotContain or "")
             blockEB:SetScript("OnTextChanged", function(self)
-                cfg.messageMustNotContain = self:GetText() or ""
+                if MTR.SetProfilePath then
+                    MTR.SetProfilePath("groupRadarConfig.messageMustNotContain", self:GetText() or "")
+                    cfg = MTR.GetProfilePath("groupRadarConfig", cfg) or cfg
+                else
+                    cfg.messageMustNotContain = self:GetText() or ""
+                end
             end)
 
             local lfgBtn=CreateFrame("Button",nil,f,"UIPanelButtonTemplate")
