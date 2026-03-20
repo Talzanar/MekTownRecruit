@@ -1,9 +1,8 @@
 # MekTownRecruit v2.0.0-beta
-
-<img width="399" height="598" alt="Screenshot_20260320_002300" src="https://github.com/user-attachments/assets/80897742-837e-419d-b32d-fd654202f5bf" />
-
-
 Finalization pass for Ascension WoW 3.3.5a (Interface 30300).
+
+
+<img width="1024" height="1536" alt="MTR" src="https://github.com/user-attachments/assets/814b659b-cc70-4102-91fd-6709ab58a32b" />
 
 ## Included release fixes
 
