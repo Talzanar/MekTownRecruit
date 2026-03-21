@@ -4,6 +4,24 @@
 -- ============================================================================
 local MTR = MekTownRecruit
 
+local function IsGuildEligibleUnit(unit, name)
+    if unit and UnitExists and UnitExists(unit) then
+        if UnitIsInMyGuild then
+            local ok = UnitIsInMyGuild(unit)
+            if ok ~= nil then return ok and true or false end
+        end
+        local myGuild = GetGuildInfo and GetGuildInfo("player") or nil
+        local unitGuild = GetGuildInfo and GetGuildInfo(unit) or nil
+        if myGuild and unitGuild and myGuild ~= "" and unitGuild ~= "" then
+            return myGuild == unitGuild
+        end
+    end
+    if MTR.IsCurrentGuildMemberName then
+        return MTR.IsCurrentGuildMemberName(name)
+    end
+    return true
+end
+
 MTR.RAID_ZONES = {
     ["Karazhan"]=true,         ["Gruul's Lair"]=true,
     ["Magtheridon's Lair"]=true, ["Serpentshrine Cavern"]=true,
@@ -19,19 +37,43 @@ MTR.RAID_ZONES = {
 -- ============================================================================
 local function AttGetPlayers()
     local players = {}
-    players[MTR.playerName] = true
+    local skipped = 0
+    local function AddIfEligible(name)
+        if not name then return end
+        if not IsGuildEligibleUnit(nil, name) then
+            skipped = skipped + 1
+            return
+        end
+        players[name] = true
+    end
+
+    AddIfEligible(MTR.playerName)
     if IsInRaid() then
         for i = 1, GetNumRaidMembers() do
-            local n = UnitName("raid"..i)
-            if n then players[n] = true end
+            local unit = "raid"..i
+            local n = UnitName(unit)
+            if n then
+                if IsGuildEligibleUnit(unit, n) then
+                    players[n] = true
+                else
+                    skipped = skipped + 1
+                end
+            end
         end
     elseif IsInGroup() then
         for i = 1, GetNumPartyMembers() do
-            local n = UnitName("party"..i)
-            if n then players[n] = true end
+            local unit = "party"..i
+            local n = UnitName(unit)
+            if n then
+                if IsGuildEligibleUnit(unit, n) then
+                    players[n] = true
+                else
+                    skipped = skipped + 1
+                end
+            end
         end
     end
-    return players
+    return players, skipped
 end
 
 -- ============================================================================
@@ -47,7 +89,7 @@ function MTR.AttSnapshot(zone)
         return
     end
     zone = zone or GetRealZoneText() or "Unknown"
-    local players = AttGetPlayers()
+    local players, skipped = AttGetPlayers()
     MTR.currentSession = { zone=zone, startTime=date("%Y-%m-%d %H:%M:%S"), startTs=time(), players=players, bosses={} }
     local count = 0
     for pname in pairs(players) do
@@ -57,7 +99,10 @@ function MTR.AttSnapshot(zone)
         table.insert(MTR.db.attendanceLog[pname], { date=date("%Y-%m-%d %H:%M:%S"), zone=zone, type="attendance", dkp=MTR.db.dkpPerRaid })
     end
     MTR.inInstance = true
-    MTR.MP("Attendance snapshot: " .. zone .. " - " .. count .. " players. +" .. MTR.db.dkpPerRaid .. " DKP each.")
+    MTR.MP("Attendance snapshot: " .. zone .. " - " .. count .. " guild members. +" .. MTR.db.dkpPerRaid .. " DKP each.")
+    if (skipped or 0) > 0 then
+        MTR.MP("Skipped " .. skipped .. " non-guild player(s).")
+    end
 end
 
 function MTR.AttBossKill(bossName)
@@ -66,7 +111,7 @@ function MTR.AttBossKill(bossName)
         return
     end
     local zone    = GetRealZoneText() or "Unknown"
-    local players = AttGetPlayers()
+    local players, skipped = AttGetPlayers()
     for pname in pairs(players) do
         MTR.DKPAdd(pname, MTR.db.dkpPerBoss, "Boss kill: " .. bossName, "System")
         if not MTR.db.attendanceLog[pname] then MTR.db.attendanceLog[pname] = {} end
@@ -77,7 +122,10 @@ function MTR.AttBossKill(bossName)
     if #MTR.db.bossKillLog > 200 then tremove(MTR.db.bossKillLog, 1) end
     local c = 0
     for _ in pairs(players) do c = c + 1 end
-    MTR.MP(bossName .. " killed! +" .. MTR.db.dkpPerBoss .. " DKP to " .. c .. " players.")
+    MTR.MP(bossName .. " killed! +" .. MTR.db.dkpPerBoss .. " DKP to " .. c .. " guild members.")
+    if (skipped or 0) > 0 then
+        MTR.MP("Skipped " .. skipped .. " non-guild player(s).")
+    end
 end
 
 function MTR.AttEnd()

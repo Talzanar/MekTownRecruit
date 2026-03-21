@@ -7,6 +7,16 @@
 local MTR = MekTownRecruit
 
 local memberWin = nil
+local BTN = {
+    SM = {100, 22},
+    MD = {120, 24},
+    LG = {140, 28},
+}
+
+local function SetStdButtonSize(btn, key)
+    local sz = BTN[key or "MD"] or BTN.MD
+    btn:SetSize(sz[1], sz[2])
+end
 
 local function SafeInvoke(func, label)
     if type(func) ~= "function" then
@@ -32,6 +42,7 @@ function MTR.OpenMemberWindow()
         memberWin:SetSize(820,580)
         memberWin:SetPoint("CENTER")
         memberWin:SetFrameStrata("MEDIUM")
+        if memberWin.SetClipsChildren then memberWin:SetClipsChildren(true) end
         memberWin:SetBackdrop({
             bgFile   = "",
             edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -68,7 +79,7 @@ function MTR.OpenMemberWindow()
         local TAB_NAMES = {"Group Radar","Loot","DKP","Standings"}
         local TAB_DISPLAY_NAMES = { ["Group Radar"] = "Home" }
         local tabBtns, tabFrames, tabBuilt, tabBuilders = {}, {}, {}, {}
-        local TAB_BTN_W, TAB_BTN_H, TAB_BTN_GAP = 116, 24, 4
+        local TAB_BTN_H, TAB_BTN_GAP = 24, 6
 
         local function CreateSectionText(parent, yOffset, text)
             local fs = parent:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
@@ -81,8 +92,8 @@ function MTR.OpenMemberWindow()
         end
 
         local function CreateActionButton(parent, text, col, row, onClick, tooltipTitle, tooltipText)
-            local BTN_W, BTN_H = 170, 34
-            local GAP_X, GAP_Y = 10, 10
+            local BTN_W, BTN_H = BTN.LG[1], BTN.LG[2]
+            local GAP_X, GAP_Y = 12, 12
             local START_X, START_Y = 8, -12
             local btn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
             btn:SetSize(BTN_W, BTN_H)
@@ -98,29 +109,42 @@ function MTR.OpenMemberWindow()
         local function ShowMemberTab(name)
             local frame = tabFrames[name]
             if not frame then return end
+            local builtNow = false
             for _, fr in pairs(tabFrames) do fr:Hide() end
             if tabBuilders[name] and not tabBuilt[name] then
                 tabBuilders[name](frame)
                 tabBuilt[name] = true
+                builtNow = true
             end
             frame:Show()
+            if MTR.ScheduleBoundsValidation and (builtNow or not frame._mtrBoundsChecked) then
+                frame._mtrBoundsChecked = true
+                MTR.ScheduleBoundsValidation(frame, "Member/" .. tostring(name), 2, 0.05)
+            end
         end
 
         for i, tname in ipairs(TAB_NAMES) do
             local f = CreateFrame("Frame",nil,memberWin)
             f:SetPoint("TOPLEFT",     memberWin,"TOPLEFT",    10,-72)
             f:SetPoint("BOTTOMRIGHT", memberWin,"BOTTOMRIGHT",-10,10)
+            if f.SetClipsChildren then f:SetClipsChildren(true) end
             f:Hide()
             tabFrames[tname] = f
 
             local btn = CreateFrame("Button",nil,memberWin,"UIPanelButtonTemplate")
-            btn:SetSize(TAB_BTN_W, TAB_BTN_H)
+            btn:SetHeight(TAB_BTN_H)
             if i == 1 then
                 btn:SetPoint("TOPLEFT",memberWin,"TOPLEFT",10,-46)
             else
                 btn:SetPoint("LEFT",tabBtns[i-1],"RIGHT",TAB_BTN_GAP,0)
             end
             btn:SetText(TAB_DISPLAY_NAMES[tname] or tname)
+            do
+                local fs = btn.GetFontString and btn:GetFontString()
+                local textW = (fs and fs.GetStringWidth and fs:GetStringWidth()) or 80
+                local w = math.max(92, math.min(142, math.floor(textW + 24)))
+                btn:SetWidth(w)
+            end
             btn:SetScript("OnClick", function() ShowMemberTab(tname) end)
             tabBtns[i] = btn
         end
@@ -191,6 +215,7 @@ function MTR.OpenMemberWindow()
             f:SetSize(560, 430)
             f:SetPoint("CENTER", 0, -20)
             f:SetFrameStrata("DIALOG")
+            if f.SetClipsChildren then f:SetClipsChildren(true) end
             f:SetBackdrop({
                 bgFile   = "",
                 edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -209,9 +234,9 @@ function MTR.OpenMemberWindow()
             f:SetScript("OnDragStart", f.StartMoving)
             f:SetScript("OnDragStop", f.StopMovingOrSizing)
 
-            local xBtn=CreateFrame("Button",nil,f,"UIPanelCloseButton")
-            xBtn:SetPoint("TOPRIGHT",f,"TOPRIGHT", -4,-4)
-            xBtn:SetScript("OnClick", function() f:Hide() end)
+            local closeBtnX = CreateFrame("Button",nil,f,"UIPanelCloseButton")
+            closeBtnX:SetPoint("TOPRIGHT",f,"TOPRIGHT", -4,-4)
+            closeBtnX:SetScript("OnClick", function() f:Hide() end)
 
             local sh=f:CreateFontString(nil,"OVERLAY","GameFontNormalLarge")
             sh:SetPoint("TOPLEFT",f,"TOPLEFT",16,-16)
@@ -304,7 +329,7 @@ function MTR.OpenMemberWindow()
             end)
 
             local lfgBtn=CreateFrame("Button",nil,f,"UIPanelButtonTemplate")
-            lfgBtn:SetSize(120,26)
+            SetStdButtonSize(lfgBtn, "LG")
             lfgBtn:SetPoint("BOTTOMLEFT",f,"BOTTOMLEFT",18,14)
             lfgBtn:SetText("Post LFG")
             lfgBtn:SetScript("OnClick", function()
@@ -313,7 +338,7 @@ function MTR.OpenMemberWindow()
             end)
 
             local presetBtn=CreateFrame("Button",nil,f,"UIPanelButtonTemplate")
-            presetBtn:SetSize(170,26)
+            SetStdButtonSize(presetBtn, "LG")
             presetBtn:SetPoint("LEFT",lfgBtn,"RIGHT",8,0)
             presetBtn:SetText("Use LFG Defaults")
             presetBtn:SetScript("OnClick", function()
@@ -327,13 +352,16 @@ function MTR.OpenMemberWindow()
             end
 
             local closeBtn=CreateFrame("Button",nil,f,"UIPanelButtonTemplate")
-            closeBtn:SetSize(90,26)
+            SetStdButtonSize(closeBtn, "MD")
             closeBtn:SetPoint("BOTTOMRIGHT",f,"BOTTOMRIGHT",-18,14)
             closeBtn:SetText("Close")
             closeBtn:SetScript("OnClick", function() f:Hide() end)
 
             memberWin._grSettingsFrame = f
             f:Show()
+            if MTR.ScheduleBoundsValidation then
+                MTR.ScheduleBoundsValidation(f, "Member/GroupRadarSettings", 2, 0.05)
+            end
         end
 
         tabBuilders["Group Radar"] = function(t)
@@ -442,7 +470,7 @@ function MTR.OpenMemberWindow()
             memberWin._memberRollRW = rwCK
 
             local openRoll = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
-            openRoll:SetSize(140, 28)
+            SetStdButtonSize(openRoll, "LG")
             openRoll:SetPoint("TOPLEFT", customLbl, "BOTTOMLEFT", 0, -18)
             openRoll:SetText("Open Roll")
             openRoll:SetScript("OnClick", function()
@@ -466,7 +494,7 @@ function MTR.OpenMemberWindow()
             end
 
             local viewActive = CreateFrame("Button", nil, t, "UIPanelButtonTemplate")
-            viewActive:SetSize(140, 28)
+            SetStdButtonSize(viewActive, "LG")
             viewActive:SetPoint("LEFT", openRoll, "RIGHT", 8, 0)
             viewActive:SetText("Show Active Roll")
             viewActive:SetScript("OnClick", function()
@@ -521,7 +549,7 @@ function MTR.OpenMemberWindow()
             memberWin._balVal = balVal
 
             local refBtn=CreateFrame("Button",nil,t,"UIPanelButtonTemplate")
-            refBtn:SetSize(80,22)
+            SetStdButtonSize(refBtn, "SM")
             refBtn:SetPoint("LEFT",balVal,"RIGHT",14,0)
             refBtn:SetText("Refresh")
             refBtn:SetScript("OnClick",function() memberWin:RefreshDKP() end)
@@ -563,7 +591,31 @@ function MTR.OpenMemberWindow()
                 for _,row in ipairs(memberWin._mStandRows) do if row then row:Hide() end end
                 memberWin._mStandRows = {}
                 local standings = MTR.DKPStandings()
-                stContent:SetHeight(math.max(500,#standings*24+10))
+                local ROW_H = 24
+                stContent:SetHeight(math.max(500,(#standings+1)*ROW_H+10))
+
+                local hRow = CreateFrame("Frame", nil, stContent)
+                hRow:SetSize(780, ROW_H)
+                hRow:SetPoint("TOPLEFT", stContent, "TOPLEFT", 4, 0)
+                local hBg = hRow:CreateTexture(nil, "BACKGROUND")
+                hBg:SetAllPoints(hRow)
+                hBg:SetColorTexture(0.16, 0.06, 0.06, 0.90)
+
+                local hRank = hRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                hRank:SetPoint("LEFT", hRow, "LEFT", 8, 0)
+                hRank:SetWidth(56) hRank:SetJustifyH("LEFT")
+                hRank:SetText("Rank")
+                local hName = hRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                hName:SetPoint("LEFT", hRow, "LEFT", 72, 0)
+                hName:SetWidth(520) hName:SetJustifyH("LEFT")
+                hName:SetText("Player")
+                local hPts = hRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                hPts:SetPoint("LEFT", hRow, "LEFT", 600, 0)
+                hPts:SetWidth(140) hPts:SetJustifyH("RIGHT")
+                hPts:SetText("DKP")
+
+                memberWin._mStandRows[#memberWin._mStandRows+1] = hRow
+
                 for i,entry in ipairs(standings) do
                     local col
                     if entry.name == MTR.playerName then col = "|cffd4af37"
@@ -572,12 +624,26 @@ function MTR.OpenMemberWindow()
                     else col = "|cffffffff" end
                     local rowFrame=CreateFrame("Frame",nil,stContent)
                     rowFrame:SetSize(780,22)
-                    rowFrame:SetPoint("TOPLEFT",stContent,"TOPLEFT",4,-(i-1)*24)
-                    local lbl=rowFrame:CreateFontString(nil,"OVERLAY","GameFontHighlight")
-                    lbl:SetPoint("LEFT",rowFrame,"LEFT",0,0)
-                    lbl:SetWidth(600)
-                    lbl:SetWordWrap(false)
-                    lbl:SetText(string.format("%s%d.|r  %-24s  %d pts", col, i, MTR.Trunc(entry.name,24), entry.balance))
+                    rowFrame:SetPoint("TOPLEFT",stContent,"TOPLEFT",4,-(i)*ROW_H)
+
+                    local rankFS=rowFrame:CreateFontString(nil,"OVERLAY","GameFontHighlight")
+                    rankFS:SetPoint("LEFT",rowFrame,"LEFT",8,0)
+                    rankFS:SetWidth(56)
+                    rankFS:SetJustifyH("LEFT")
+                    rankFS:SetText(string.format("%s%d.|r", col, i))
+
+                    local nameFS=rowFrame:CreateFontString(nil,"OVERLAY","GameFontHighlight")
+                    nameFS:SetPoint("LEFT",rowFrame,"LEFT",72,0)
+                    nameFS:SetWidth(520)
+                    nameFS:SetWordWrap(false)
+                    nameFS:SetJustifyH("LEFT")
+                    nameFS:SetText(string.format("%s%s|r", col, MTR.Trunc(entry.name, 28)))
+
+                    local ptsFS=rowFrame:CreateFontString(nil,"OVERLAY","GameFontHighlight")
+                    ptsFS:SetPoint("LEFT",rowFrame,"LEFT",600,0)
+                    ptsFS:SetWidth(140)
+                    ptsFS:SetJustifyH("RIGHT")
+                    ptsFS:SetText(string.format("%d pts", entry.balance or 0))
                     rowFrame:Show()
                     memberWin._mStandRows[#memberWin._mStandRows+1] = rowFrame
                 end
@@ -585,7 +651,7 @@ function MTR.OpenMemberWindow()
             memberWin._buildMemberStandings = BuildStandings
 
             local refBtn=CreateFrame("Button",nil,t,"UIPanelButtonTemplate")
-            refBtn:SetSize(100,26)
+            SetStdButtonSize(refBtn, "MD")
             refBtn:SetPoint("BOTTOMLEFT",t,"BOTTOMLEFT",0,6)
             refBtn:SetText("Refresh")
             refBtn:SetScript("OnClick",BuildStandings)
@@ -621,4 +687,7 @@ function MTR.OpenMemberWindow()
     if MTR.initialized and MTR.db then memberWin:RefreshDKP() end
     memberWin._showTab("Group Radar")
     memberWin:Show()
+    if MTR.ScheduleBoundsValidation then
+        MTR.ScheduleBoundsValidation(memberWin, "Member/Window", 2, 0.05)
+    end
 end

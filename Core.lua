@@ -16,7 +16,7 @@
 MekTownRecruit = MekTownRecruit or {}
 local MTR = MekTownRecruit
 
-MTR.VERSION = "2.0.0-beta"
+MTR.VERSION = "2.0.0"
 
 
 -- ============================================================================
@@ -184,6 +184,11 @@ MTR.DEFAULTS = {
         "we are recruiting","guild advertisement",
     },
     enableDebug   = false,
+    debugSettings = {
+        enabled = false,
+        chat = false,
+        modules = {},
+    },
     soundAlert    = true,
     minimapButton = true,
     popupWidth    = 350,
@@ -233,6 +238,7 @@ MTR.DEFAULTS = {
 
     -- Permissions
     permissionOfficerRanks = {},
+    permissionOfficerRankIndexes = {},
     permissionFeatureAccess = {
         ["Vault"] = true,
         ["Recruit"] = true,
@@ -398,31 +404,94 @@ function MTR.DeepCopy(orig)
 end
 
 function MTR.Hash(str)
-    local h = 0
-    for i = 1, #str do h = (h * 31 + str:byte(i)) % 1048576 end
-    return tostring(h)
+    str = tostring(str or "")
+    local h1 = 2166136261
+    local h2 = 2246822519
+    for i = 1, #str do
+        local b = str:byte(i)
+        h1 = (h1 * 16777619 + b + i) % 4294967296
+        h2 = (h2 * 2246822519 + (b * 131 + i * 17)) % 4294967296
+    end
+    return string.format("%08x%08x", h1, h2)
 end
 
 function MTR.MP(msg)  print("|cff00c0ff[MekTown]|r " .. tostring(msg)) end
 function MTR.MPE(msg) print("|cffff4444[MekTown]|r " .. tostring(msg)) end
 
-function MTR.IsDebugEnabled()
-    return MTR.db and MTR.db.enableDebug == true
+local function EnsureDebugSettings()
+    if type(MTR.db) ~= "table" then return { enabled = false, chat = false, modules = {} } end
+    if type(MTR.db.debugSettings) ~= "table" then
+        MTR.db.debugSettings = MTR.DeepCopy(MTR.DEFAULTS.debugSettings)
+    end
+    local ds = MTR.db.debugSettings
+    ds.enabled = (ds.enabled == true)
+    ds.chat = (ds.chat == true)
+    if type(ds.modules) ~= "table" then ds.modules = {} end
+    MTR.db.enableDebug = ds.enabled
+    MTR.db.debug = ds.enabled
+    return ds
+end
+
+function MTR.IsDebugEnabled(module)
+    if not MTR.db then return false end
+    local ds = EnsureDebugSettings()
+    if not ds.enabled then return false end
+    if type(module) ~= "string" or module == "" then return true end
+    local key = string.lower(module)
+    if ds.modules["all"] == true or ds.modules["*"] == true then return true end
+    return ds.modules[key] == true
 end
 
 function MTR.SetDebugEnabled(flag)
     if not MTR.db then return end
+    local ds = EnsureDebugSettings()
     local enabled = flag and true or false
+    ds.enabled = enabled
+    MTR.db.debugSettings = ds
     MTR.db.enableDebug = enabled
     MTR.db.debug = enabled -- legacy compatibility for older code / saved vars
 end
 
+function MTR.IsDebugChatEnabled()
+    if not MTR.db then return false end
+    local ds = EnsureDebugSettings()
+    return ds.enabled and ds.chat == true
+end
+
+function MTR.SetDebugChatEnabled(flag)
+    if not MTR.db then return end
+    local ds = EnsureDebugSettings()
+    ds.chat = flag and true or false
+    MTR.db.debugSettings = ds
+end
+
+function MTR.SetDebugModuleEnabled(module, flag)
+    if type(module) ~= "string" or module == "" or not MTR.db then return end
+    local ds = EnsureDebugSettings()
+    ds.modules[string.lower(module)] = (flag == true)
+    MTR.db.debugSettings = ds
+end
+
+function MTR.GetDebugModules()
+    if not MTR.db then return {} end
+    local ds = EnsureDebugSettings()
+    return ds.modules
+end
+
 function MTR.dprint(...)
-    if MTR.IsDebugEnabled() then
+    if MTR.IsDebugEnabled("core") and MTR.IsDebugChatEnabled() then
         local t = {}
         for i = 1, select("#", ...) do t[i] = tostring(select(i, ...)) end
         print("|cff888888[MekTown DBG]|r " .. table.concat(t, " "))
     end
+end
+
+function MTR.dprintModule(module, ...)
+    if not MTR.IsDebugEnabled(module) or not MTR.IsDebugChatEnabled() then return end
+    local t = {}
+    for i = 1, select("#", ...) do t[i] = tostring(select(i, ...)) end
+    local m = tostring(module or "debug")
+    print("|cff888888[MekTown DBG:" .. m .. "]|r " .. table.concat(t, " "))
 end
 
 function MTR.Trunc(text, maxChars)
@@ -505,6 +574,13 @@ local function NormalizeProfileBooleans(profile)
     if profile.debug ~= nil then
         profile.debug = (profile.debug == true or profile.debug == 1)
     end
+    if type(profile.debugSettings) ~= "table" then
+        profile.debugSettings = MTR.DeepCopy(MTR.DEFAULTS.debugSettings)
+    end
+    local ds = profile.debugSettings
+    ds.enabled = (ds.enabled == true or ds.enabled == 1)
+    ds.chat = (ds.chat == true or ds.chat == 1)
+    if type(ds.modules) ~= "table" then ds.modules = {} end
     return profile
 end
 
@@ -702,6 +778,18 @@ function MTR.InitDB()
             if profile.enableDebug == nil then
                 profile.enableDebug = profile.debug == true
             end
+            if type(profile.debugSettings) ~= "table" then
+                profile.debugSettings = MTR.DeepCopy(MTR.DEFAULTS.debugSettings)
+            end
+            if profile.debugSettings.enabled == nil then
+                profile.debugSettings.enabled = profile.enableDebug == true
+            end
+            if profile.debugSettings.chat == nil then
+                profile.debugSettings.chat = false
+            end
+            if type(profile.debugSettings.modules) ~= "table" then
+                profile.debugSettings.modules = {}
+            end
             profile.debug = nil
 
             -- Normalize legacy checkbox-backed flags to strict booleans so old
@@ -763,7 +851,26 @@ end
 -- PERMISSION CHECKS
 -- ============================================================================
 local function NormalizeRankName(rankName)
-    return tostring(rankName or ""):gsub("^%s+", ""):gsub("%s+$", ""):upper()
+    local s = tostring(rankName or "")
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    s = s:gsub("[\r\n]", " ")
+    s = s:gsub("[’`´]", "'")
+    s = s:gsub("%s+", " ")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    return s:upper()
+end
+
+local function RankIndexKey(rankIndex)
+    local idx = tonumber(rankIndex)
+    if not idx then return "" end
+    return tostring(math.floor(idx))
+end
+
+function MTR.IsOfficerRankIndex(rankIndex)
+    local idx = tonumber(rankIndex)
+    if not idx then return false end
+    idx = math.floor(idx)
+    return idx >= 0 and idx <= 2
 end
 
 local function ShortName(name)
@@ -848,7 +955,7 @@ function MTR.GetOfficerRankSuggestions()
             if info.index ~= 0 then
                 local okSet = pcall(GuildControlSetRank, (tonumber(info.index) or 0) + 1)
                 if okSet then
-                    local okFlags, guildchat_listen, guildchat_speak, officerchat_listen, officerchat_speak, promote, demote, invite_member, remove_member, set_motd, edit_public_note, view_officer_note, edit_officer_note, modify_guild_info, unknown_flag, withdraw_repair, withdraw_gold, create_guild_event = pcall(GuildControlGetRankFlags)
+                    local okFlags, _, _, officerchat_listen, officerchat_speak, promote, demote, invite_member, remove_member, set_motd, _, view_officer_note, edit_officer_note, modify_guild_info, _, _, withdraw_gold, create_guild_event = pcall(GuildControlGetRankFlags)
                     if okFlags then
                         usedPermissionProbe = true
                         local score = 0
@@ -864,6 +971,7 @@ function MTR.GetOfficerRankSuggestions()
                         if _mtrBool(modify_guild_info) then score = score + 1 end
                         if _mtrBool(withdraw_gold) then score = score + 1 end
                         if _mtrBool(create_guild_event) then score = score + 1 end
+                        -- Unused: gchat_l, gchat_s, edit_pnote, unknown_flag, withdraw_repair
                         if score >= 5 then
                             suggested[NormalizeRankName(info.name)] = true
                         end
@@ -898,17 +1006,23 @@ end
 function MTR.ApplyOfficerRankSuggestions(clearExisting)
     if not MTR.db then return 0 end
     MTR.db.permissionOfficerRanks = MTR.db.permissionOfficerRanks or {}
+    MTR.db.permissionOfficerRankIndexes = MTR.db.permissionOfficerRankIndexes or {}
     if clearExisting then
         for k in pairs(MTR.db.permissionOfficerRanks) do
             MTR.db.permissionOfficerRanks[k] = nil
+        end
+        for k in pairs(MTR.db.permissionOfficerRankIndexes) do
+            MTR.db.permissionOfficerRankIndexes[k] = nil
         end
     end
     local suggested = MTR.GetOfficerRankSuggestions()
     local count = 0
     for _, info in ipairs(suggested) do
         local key = NormalizeRankName(info.name)
+        local ikey = RankIndexKey(info.index)
         if key ~= "" then
             MTR.db.permissionOfficerRanks[key] = true
+            if ikey ~= "" then MTR.db.permissionOfficerRankIndexes[ikey] = true end
             count = count + 1
         end
     end
@@ -917,22 +1031,35 @@ function MTR.ApplyOfficerRankSuggestions(clearExisting)
     return count
 end
 
-function MTR.IsConfiguredOfficerRank(rankName)
+function MTR.IsConfiguredOfficerRank(rankName, rankIndex)
     local db = MTR.db
+    local mapIdx = db and db.permissionOfficerRankIndexes
+    local ikey = RankIndexKey(rankIndex)
+    if type(mapIdx) == "table" and ikey ~= "" and mapIdx[ikey] == true then return true end
+
     local map = db and db.permissionOfficerRanks
     if type(map) ~= "table" then return false end
-    return map[NormalizeRankName(rankName)] == true
+    local key = NormalizeRankName(rankName)
+    if map[key] == true then return true end
+    local keyNoApos = key:gsub("'", "")
+    if keyNoApos ~= key and map[keyNoApos] == true then return true end
+    if MTR.IsOfficerRankIndex and MTR.IsOfficerRankIndex(rankIndex) then return true end
+    return false
 end
 
-function MTR.SetOfficerRank(rankName, isEnabled)
+function MTR.SetOfficerRank(rankName, isEnabled, rankIndex)
     if not MTR.db then return false end
     MTR.db.permissionOfficerRanks = MTR.db.permissionOfficerRanks or {}
+    MTR.db.permissionOfficerRankIndexes = MTR.db.permissionOfficerRankIndexes or {}
     local key = NormalizeRankName(rankName)
-    if key == "" then return false end
+    local ikey = RankIndexKey(rankIndex)
+    if key == "" and ikey == "" then return false end
     if isEnabled then
-        MTR.db.permissionOfficerRanks[key] = true
+        if key ~= "" then MTR.db.permissionOfficerRanks[key] = true end
+        if ikey ~= "" then MTR.db.permissionOfficerRankIndexes[ikey] = true end
     else
-        MTR.db.permissionOfficerRanks[key] = nil
+        if key ~= "" then MTR.db.permissionOfficerRanks[key] = nil end
+        if ikey ~= "" then MTR.db.permissionOfficerRankIndexes[ikey] = nil end
     end
     MTR.isGM = MTR.CheckIsGM()
     MTR.isOfficer = MTR.CheckIsOfficer()
@@ -947,7 +1074,8 @@ function MTR.CheckIsOfficer()
         local n, rankName, rankIndex = GetGuildRosterInfo(i)
         if IsPlayerRosterName(n) then
             if tonumber(rankIndex) == 1 then return true end
-            if MTR.IsConfiguredOfficerRank and MTR.IsConfiguredOfficerRank(rankName) then return true end
+            if MTR.IsOfficerRankIndex and MTR.IsOfficerRankIndex(rankIndex) then return true end
+            if MTR.IsConfiguredOfficerRank and MTR.IsConfiguredOfficerRank(rankName, rankIndex) then return true end
             local nameKey = NormalizeRankName(rankName)
             if nameKey:find("OFFIC", 1, true) or nameKey:find("ADMIN", 1, true) or nameKey:find("LEAD", 1, true) or nameKey:find("CO%-GM") or nameKey:find("COGM", 1, true) then
                 return true
@@ -959,16 +1087,21 @@ function MTR.CheckIsOfficer()
 end
 
 
-function MTR.GetPlayerRankName()
-    if not IsInGuild() then return nil end
+function MTR.GetPlayerRankInfo()
+    if not IsInGuild() then return nil, nil end
     local num = GetNumGuildMembers() or 0
     for i = 1, num do
-        local n, rankName = GetGuildRosterInfo(i)
+        local n, rankName, rankIndex = GetGuildRosterInfo(i)
         if IsPlayerRosterName(n) then
-            return rankName
+            return rankName, rankIndex
         end
     end
-    return nil
+    return nil, nil
+end
+
+function MTR.GetPlayerRankName()
+    local rankName = MTR.GetPlayerRankInfo and MTR.GetPlayerRankInfo() or nil
+    return rankName
 end
 
 local FEATURE_RANK_RESTRICTED = {
@@ -977,41 +1110,66 @@ local FEATURE_RANK_RESTRICTED = {
     ["Inactive"] = true,
 }
 
-local FEATURE_OFFICER_ONLY = {
-    ["Guild"] = true,
-}
-
-function MTR.GetFeatureAccessForRank(featureName, rankName)
+function MTR.GetFeatureAccessForRank(featureName, rankName, rankIndex)
     if not FEATURE_RANK_RESTRICTED[featureName] then
         return true
     end
+    if MTR.IsConfiguredOfficerRank and MTR.IsConfiguredOfficerRank(rankName, rankIndex) then
+        return true
+    end
+    if MTR.IsOfficerRankIndex and MTR.IsOfficerRankIndex(rankIndex) then
+        return true
+    end
     local key = NormalizeRankName(rankName)
+    local ikey = RankIndexKey(rankIndex)
     if key == "" then return false end
     local db = MTR.db
     local map = db and db.permissionFeatureAccess
     local featureMap = type(map) == "table" and map[featureName] or nil
+    if type(featureMap) == "table" and ikey ~= "" and featureMap[ikey] ~= nil then
+        return featureMap[ikey] == true
+    end
     if type(featureMap) == "table" and featureMap[key] ~= nil then
         return featureMap[key] == true
     end
-    return MTR.IsConfiguredOfficerRank(rankName)
+    return MTR.IsConfiguredOfficerRank(rankName, rankIndex)
 end
 
-function MTR.SetFeatureAccessForRank(featureName, rankName, isAllowed)
+function MTR.SetFeatureAccessForRank(featureName, rankName, isAllowed, rankIndex)
     if not MTR.db or not FEATURE_RANK_RESTRICTED[featureName] then return false end
     local key = NormalizeRankName(rankName)
-    if key == "" then return false end
+    local ikey = RankIndexKey(rankIndex)
+    if key == "" and ikey == "" then return false end
     MTR.db.permissionFeatureAccess = MTR.db.permissionFeatureAccess or {}
     MTR.db.permissionFeatureAccess[featureName] = MTR.db.permissionFeatureAccess[featureName] or {}
-    MTR.db.permissionFeatureAccess[featureName][key] = (isAllowed and true or false)
+    if key ~= "" then MTR.db.permissionFeatureAccess[featureName][key] = (isAllowed and true or false) end
+    if ikey ~= "" then MTR.db.permissionFeatureAccess[featureName][ikey] = (isAllowed and true or false) end
     return true
 end
 
 function MTR.IsGuildToolAccess()
-    return (MTR.isOfficer == true or MTR.isGM == true)
+    if MTR.isGM == true then return true end
+    local rankName, rankIndex
+    if MTR.GetPlayerRankInfo then
+        rankName, rankIndex = MTR.GetPlayerRankInfo()
+    end
+    if not rankName then
+        return (MTR.isOfficer == true)
+    end
+    return MTR.GetFeatureAccessForRank("Recruit", rankName, rankIndex) == true
 end
 
 function MTR.GetFeatureAccess(featureName)
     if featureName == "Recruit" or featureName == "DKP" or featureName == "Inactive" or featureName == "Loot" or featureName == "GuildAds" then
+        if MTR.isGM == true then return true end
+        local rankName, rankIndex
+        if MTR.GetPlayerRankInfo then
+            rankName, rankIndex = MTR.GetPlayerRankInfo()
+        end
+        if not rankName then return MTR.IsGuildToolAccess() end
+        if FEATURE_RANK_RESTRICTED[featureName] then
+            return MTR.GetFeatureAccessForRank(featureName, rankName, rankIndex) == true
+        end
         return MTR.IsGuildToolAccess()
     end
     return true
@@ -1032,4 +1190,3 @@ function MTR.CanInvite()
 end
 
 print("|cff00c0ff[MekTown Recruit]|r Core v" .. MTR.VERSION .. " loaded.")
-

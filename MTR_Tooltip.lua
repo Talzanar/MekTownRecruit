@@ -1,7 +1,7 @@
 
 MTR_Tooltip = {}
 
-function MTR_Tooltip:Show(frame, itemLink, bag, slot)
+function MTR_Tooltip.Show(frame, itemLink, bag, slot)
     GameTooltip:SetOwner(frame, "ANCHOR_RIGHT")
 
     if itemLink then
@@ -15,6 +15,6 @@ function MTR_Tooltip:Show(frame, itemLink, bag, slot)
     GameTooltip:Show()
 end
 
-function MTR_Tooltip:Hide()
+function MTR_Tooltip.Hide()
     GameTooltip:Hide()
 end

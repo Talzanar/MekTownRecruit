@@ -24,7 +24,7 @@ local function HideLootPrompt()
     pendingLink = nil
 end
 
-local function ShowLootPrompt(itemLink, itemName)
+local function ShowLootPrompt(itemLink)
     -- Don't stack prompts - queue the most recent item
     pendingLink = itemLink
 
@@ -151,7 +151,7 @@ lootFrame:SetScript("OnEvent", function(self, event)
             if itemLink then
                 local itemName = MTR.ItemLinkToName(itemLink)
                 MTR.dprint("Epic loot detected:", itemName, "quality:", quality)
-                ShowLootPrompt(itemLink, itemName)
+                ShowLootPrompt(itemLink)
                 break  -- show prompt for the first epic+ item
             end
         end
@@ -182,7 +182,7 @@ lootFrame:SetScript("OnEvent", function(self, event)
             if quality and quality >= QUALITY_THRESHOLD and not locked then
                 local itemLink = GetLootSlotLink(i)
                 if itemLink then
-                    ShowLootPrompt(itemLink, MTR.ItemLinkToName(itemLink))
+                    ShowLootPrompt(itemLink)
                     break
                 end
             end

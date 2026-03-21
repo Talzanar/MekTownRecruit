@@ -50,6 +50,18 @@ initFrame:SetScript("OnEvent",function(self,event)
             if IsInGuild() and MTR.DKPRequestFullSync then
                 MTR.DKPRequestFullSync()
             end
+            if IsInGuild() then
+                local gbHash = "0"
+                if MTR.GetSyncAuditStatus then
+                    local ss = MTR.GetSyncAuditStatus()
+                    gbHash = (ss and ss.guildBankSnapshot and ss.guildBankSnapshot.hash) or "0"
+                end
+                if MTR.SendGuildScoped then
+                    MTR.SendGuildScoped("MekTownGB", "GB:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(gbHash))
+                else
+                    SendAddonMessage("MekTownGB", "GB:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(gbHash), "GUILD")
+                end
+            end
             if IsInGuild() and MTR.GuildBankLedger and MTR.GuildBankLedger.RequestSync then
                 MTR.GuildBankLedger.RequestSync()
             end
@@ -66,7 +78,7 @@ initFrame:SetScript("OnEvent",function(self,event)
         end
     end)
 
-    print("|cff00c0ff[MekTown Recruit]|r v2.0.0-beta Ready — profile |cffffff00"..
+    print("|cff00c0ff[MekTown Recruit]|r v"..tostring(MTR.VERSION or "2.0.0").." Ready — profile |cffffff00"..
         MekTownRecruitDB.activeProfile.."|r  |cffaaaaaa("..
         #MTR.db.keywords.." recruit keywords · "..
         #MTR.db.whisperTemplates.." whisper templates · /mek help)|r")
@@ -89,7 +101,10 @@ SlashCmdList["MEKTOWN"]=function(msg)
         MTR.MP("Commands:")
         print("  /mek config              - Open config window")
         print("  /mek on / off            - Enable/disable scanner")
-        print("  /mek debug               - Toggle Enable Debug")
+        print("  /mek debug on/off        - Master debug toggle")
+        print("  /mek debug chat on/off   - Debug chat spam toggle")
+        print("  /mek debug module <m> on/off - Module debug toggle")
+        print("  /mek debug status        - Show debug routing status")
         print("  /mek test                - Test popup")
         print("  /mek add <kw>            - Add keyword")
         print("  /mek list                - List keywords")
@@ -103,6 +118,9 @@ SlashCmdList["MEKTOWN"]=function(msg)
         print("  /mek dkp publish [chan]")
         print("  /mek dkp sync")
         print("  /mek dkp snapshot       - Officer full verified ledger snapshot")
+        print("  /mek sync status         - Show sync health and revisions")
+        print("  /mek sync verify         - Verify local event chain integrity")
+        print("  /mek sync repair [dkp|guildtree|recruit|kick|inactivewl|gbank|ledger|all]")
         print("  /mek auction <item|link> [min] [secs] [rw]")
         print("  /mek roll <item|link> [MS/OS/Transmog/Legendary/Tier Token] [secs] [rw]")
         print("  /mek att start [zone]")
@@ -119,7 +137,7 @@ SlashCmdList["MEKTOWN"]=function(msg)
         print("  /mek inactive debug")
         print("  /mek inactive whitelist add/remove <n>")
         print("  /mek motd <key>")
-        print("  /mek ledgerdebug [show|clear|on|off] (requires Enable Debug)")
+        print("  /mek ledgerdebug [show|clear|on|off]")
 
     elseif cmd=="config" then
         MTR.OpenConfig()
@@ -132,10 +150,11 @@ SlashCmdList["MEKTOWN"]=function(msg)
             MTR.GuildBankLedger.DebugClear()
         elseif sub=="on" then
             MTR.SetDebugEnabled(true)
+            if MTR.SetDebugModuleEnabled then MTR.SetDebugModuleEnabled("ledger", true) end
             if MTR.GuildBankLedger and MTR.GuildBankLedger.DebugEnable then MTR.GuildBankLedger.DebugEnable(true) end
         elseif sub=="off" then
             if MTR.GuildBankLedger and MTR.GuildBankLedger.DebugEnable then MTR.GuildBankLedger.DebugEnable(false) end
-            MTR.SetDebugEnabled(false)
+            if MTR.SetDebugModuleEnabled then MTR.SetDebugModuleEnabled("ledger", false) end
         else
             MTR.GuildBankLedger.DebugDump(60)
         end
@@ -147,11 +166,58 @@ SlashCmdList["MEKTOWN"]=function(msg)
         MTR.SetProfileBoolean("enabled", false) MTR.MP("|cffff4444Scanner disabled|r")
 
     elseif cmd=="debug" then
-        local enabled = not MTR.IsDebugEnabled()
-        MTR.SetDebugEnabled(enabled)
-        MTR.MP("Enable Debug: "..(enabled and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
+        local sub, rest = (args or ""):match("^(%S*)%s*(.-)$")
+        sub = (sub or ""):lower()
+        rest = rest or ""
+
+        if sub=="" then
+            local enabled = not MTR.IsDebugEnabled()
+            MTR.SetDebugEnabled(enabled)
+            MTR.MP("Debug master: "..(enabled and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
+        elseif sub=="on" or sub=="off" then
+            local enabled = (sub == "on")
+            MTR.SetDebugEnabled(enabled)
+            MTR.MP("Debug master: "..(enabled and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
+        elseif sub=="chat" then
+            local mode = (rest or ""):lower()
+            if mode=="on" or mode=="off" then
+                local flag = (mode == "on")
+                if MTR.SetDebugChatEnabled then MTR.SetDebugChatEnabled(flag) end
+                MTR.MP("Debug chat output: "..(flag and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
+            else
+                MTR.MP("/mek debug chat on|off")
+            end
+        elseif sub=="module" then
+            local mod, mode = rest:match("^(%S+)%s*(%S*)$")
+            mod = (mod or ""):lower()
+            mode = (mode or ""):lower()
+            if mod ~= "" and (mode == "on" or mode == "off") then
+                if MTR.SetDebugModuleEnabled then MTR.SetDebugModuleEnabled(mod, mode == "on") end
+                MTR.MP("Debug module '" .. mod .. "': " .. ((mode == "on") and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
+            else
+                MTR.MP("/mek debug module <name> on|off")
+            end
+        elseif sub=="status" then
+            local master = MTR.IsDebugEnabled and MTR.IsDebugEnabled() or false
+            local chat = MTR.IsDebugChatEnabled and MTR.IsDebugChatEnabled() or false
+            MTR.MP("Debug master: " .. (master and "|cff00ff00ON|r" or "|cffff4444OFF|r") .. "  chat: " .. (chat and "|cff00ff00ON|r" or "|cffff4444OFF|r"))
+            local mods = MTR.GetDebugModules and MTR.GetDebugModules() or {}
+            local enabledMods = {}
+            for k, v in pairs(mods) do
+                if v == true then enabledMods[#enabledMods + 1] = tostring(k) end
+            end
+            table.sort(enabledMods)
+            MTR.MP("Debug modules: " .. (#enabledMods > 0 and table.concat(enabledMods, ", ") or "(none)"))
+        else
+            MTR.MP("/mek debug [on|off|chat on|off|module <name> on|off|status]")
+        end
 
     elseif cmd=="test" then
+        if MTR.ShowTestPopup then
+            MTR.ShowTestPopup()
+        else
+            MTR.MPE("Test popup unavailable.")
+        end
 
     elseif cmd=="add" and args~="" then
         local kw=args:lower()
@@ -168,19 +234,160 @@ SlashCmdList["MEKTOWN"]=function(msg)
         elseif sub=="off" then MTR.SetGuildInviteEnabled(false) MTR.MP("Auto-invite: |cffff4444OFF|r")
         else MTR.MP("/mek invite [on|off]") end
 
+    elseif cmd=="sync" then
+        local sub, rest = args:match("^(%S+)%s*(.*)")
+        sub = (sub or "status"):lower()
+        if sub == "status" then
+            local function PeerCount(t)
+                local c = 0
+                if type(t) ~= "table" then return 0 end
+                for _ in pairs(t) do c = c + 1 end
+                return c
+            end
+            local s = MTR.GetSyncAuditStatus and MTR.GetSyncAuditStatus() or {}
+            local dkp = s.dkp or {}
+            local rec = s.recruit or {}
+            local kick = s.kick or {}
+            local iwl = s.inactivityWhitelist or {}
+            local gt = s.guildTree or {}
+            local gb = s.guildBankSnapshot or {}
+            local gbl = s.guildBankLedger or {}
+            local ev = s.event or {}
+            MTR.MP("Sync Status")
+            print("  Guild Key: " .. tostring(s.guildKey or "?"))
+            print("  Guild Id : " .. tostring(s.guildId or "(unset)"))
+            print(string.format("  DKP     : rev=%s hash=%s from=%s ack=%d", tostring(dkp.revision or 0), tostring(dkp.hash or "0"), tostring(dkp.lastFullSyncFrom or "?"), PeerCount(dkp.lastAckByPeer)))
+            print(string.format("  Recruit : rev=%s hash=%s ack=%d", tostring(rec.revision or 0), tostring(rec.hash or "0"), PeerCount(rec.lastAckByPeer)))
+            print(string.format("  KickLog : rev=%s hash=%s ack=%d", tostring(kick.revision or 0), tostring(kick.hash or "0"), PeerCount(kick.lastAckByPeer)))
+            print(string.format("  InactWL : rev=%s hash=%s ack=%d", tostring(iwl.revision or 0), tostring(iwl.hash or "0"), PeerCount(iwl.lastAckByPeer)))
+            print(string.format("  GTree   : rev=%s hash=%s ack=%d", tostring(gt.revision or 0), tostring(gt.hash or "0"), PeerCount(gt.lastAckByPeer)))
+            print(string.format("  GBank   : rev=%s hash=%s from=%s ack=%d", tostring(gb.revision or 0), tostring(gb.hash or "0"), tostring(gb.lastSyncFrom or "?"), PeerCount(gb.lastAckByPeer)))
+            print(string.format("  Ledger  : rev=%s hash=%s from=%s ack=%d", tostring(gbl.revision or 0), tostring(gbl.hash or "0"), tostring(gbl.lastSyncFrom or "?"), PeerCount(gbl.lastAckByPeer)))
+            if dkp.lastConflictReason then print(string.format("  DKP Conflict    : %s from %s", tostring(dkp.lastConflictReason), tostring(dkp.lastConflictFrom or "?"))) end
+            if rec.lastConflictReason then print(string.format("  Recruit Conflict: %s from %s", tostring(rec.lastConflictReason), tostring(rec.lastConflictFrom or "?"))) end
+            if kick.lastConflictReason then print(string.format("  Kick Conflict   : %s from %s", tostring(kick.lastConflictReason), tostring(kick.lastConflictFrom or "?"))) end
+            if iwl.lastConflictReason then print(string.format("  InactWL Conflict: %s from %s", tostring(iwl.lastConflictReason), tostring(iwl.lastConflictFrom or "?"))) end
+            if gt.lastConflictReason then print(string.format("  GTree Conflict  : %s from %s", tostring(gt.lastConflictReason), tostring(gt.lastConflictFrom or "?"))) end
+            if gb.lastConflictReason then print(string.format("  GBank Conflict  : %s from %s", tostring(gb.lastConflictReason), tostring(gb.lastConflictFrom or "?"))) end
+            if gbl.lastConflictReason then print(string.format("  Ledger Conflict : %s from %s", tostring(gbl.lastConflictReason), tostring(gbl.lastConflictFrom or "?"))) end
+            local evState
+            if ev.ok then
+                evState = ev.truncated and "OK (truncated window)" or "OK"
+            else
+                evState = "BROKEN:" .. tostring(ev.reason or "?")
+            end
+            print(string.format("  EventLog: %s (%s entries checked)", evState, tostring(ev.checked or 0)))
+        elseif sub == "verify" then
+            local ev = MTR.VerifyGuildEventChain and MTR.VerifyGuildEventChain() or { ok = true, checked = 0 }
+            if ev.ok then
+                MTR.MP("Event chain verified: " .. tostring(ev.checked or 0) .. " entries.")
+            else
+                MTR.MPE("Event chain broken at entry " .. tostring(ev.brokenAt or 0) .. " (" .. tostring(ev.reason or "?") .. ")")
+            end
+        elseif sub == "repair" then
+            local domain = (rest or "all"):lower()
+            local did = false
+            if domain == "all" or domain == "dkp" then
+                if MTR.DKPRequestFullSync then MTR.DKPRequestFullSync() did = true end
+            end
+            if domain == "all" or domain == "gtree" or domain == "guildtree" then
+                if IsInGuild() then
+                    local gtHash = "0"
+                    if MTR.GetSyncAuditStatus then
+                        local ss = MTR.GetSyncAuditStatus()
+                        gtHash = (ss and ss.guildTree and ss.guildTree.hash) or "0"
+                    end
+                    if MTR.SendGuildScoped then MTR.SendGuildScoped("MekTownGT", "GT:REQ:" .. tostring(gtHash)) else SendAddonMessage("MekTownGT", "GT:REQ:" .. tostring(gtHash), "GUILD") end
+                    did = true
+                end
+            end
+            if domain == "all" or domain == "recruit" then
+                if IsInGuild() then
+                    local rhHash = "0"
+                    if MTR.GetSyncAuditStatus then
+                        local ss = MTR.GetSyncAuditStatus()
+                        rhHash = (ss and ss.recruit and ss.recruit.hash) or "0"
+                    end
+                    if MTR.SendGuildScoped then MTR.SendGuildScoped("MekTownRH", "RH:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(rhHash)) else SendAddonMessage("MekTownRH", "RH:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(rhHash), "GUILD") end
+                    did = true
+                end
+            end
+            if domain == "all" or domain == "kick" then
+                if IsInGuild() then
+                    local kkHash = "0"
+                    if MTR.GetSyncAuditStatus then
+                        local ss = MTR.GetSyncAuditStatus()
+                        kkHash = (ss and ss.kick and ss.kick.hash) or "0"
+                    end
+                    if MTR.SendGuildScoped then MTR.SendGuildScoped("MekTownKK", "KK:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(kkHash)) else SendAddonMessage("MekTownKK", "KK:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(kkHash), "GUILD") end
+                    did = true
+                end
+            end
+            if domain == "all" or domain == "inactivewl" or domain == "whitelist" then
+                if IsInGuild() then
+                    local iwHash = "0"
+                    if MTR.GetSyncAuditStatus then
+                        local ss = MTR.GetSyncAuditStatus()
+                        iwHash = (ss and ss.inactivityWhitelist and ss.inactivityWhitelist.hash) or "0"
+                    end
+                    if MTR.SendGuildScoped then MTR.SendGuildScoped("MekTownIW", "IW:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(iwHash)) else SendAddonMessage("MekTownIW", "IW:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(iwHash), "GUILD") end
+                    did = true
+                end
+            end
+            if domain == "all" or domain == "gbank" then
+                if IsInGuild() then
+                    local gbHash = "0"
+                    if MTR.GetSyncAuditStatus then
+                        local ss = MTR.GetSyncAuditStatus()
+                        gbHash = (ss and ss.guildBankSnapshot and ss.guildBankSnapshot.hash) or "0"
+                    end
+                    if MTR.SendGuildScoped then MTR.SendGuildScoped("MekTownGB", "GB:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(gbHash)) else SendAddonMessage("MekTownGB", "GB:REQ:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(gbHash), "GUILD") end
+                    did = true
+                end
+            end
+            if domain == "all" or domain == "ledger" or domain == "gledger" then
+                if IsInGuild() then
+                    local glHash = "0"
+                    if MTR.GetSyncAuditStatus then
+                        local ss = MTR.GetSyncAuditStatus()
+                        glHash = (ss and ss.guildBankLedger and ss.guildBankLedger.hash) or "0"
+                    end
+                    if MTR.GuildBankLedger and MTR.GuildBankLedger.RequestSync then
+                        MTR.GuildBankLedger.RequestSync()
+                    elseif MTR.SendGuildScoped then
+                        MTR.SendGuildScoped("MekTownGBL", "GL:R:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(glHash))
+                    else
+                        SendAddonMessage("MekTownGBL", "GL:R:" .. tostring(MTR.playerName or "?") .. ":" .. tostring(glHash), "GUILD")
+                    end
+                    did = true
+                end
+            end
+            if did then
+                MTR.MP("Sync repair request sent for: " .. domain)
+            else
+                MTR.MPE("No sync repair action available.")
+            end
+        else
+            MTR.MP("/mek sync [status|verify|repair [dkp|guildtree|recruit|kick|inactivewl|gbank|ledger|all]]")
+        end
+
     elseif cmd=="dkp" then
         local sub,rest=args:match("^(%S+)%s*(.*)")
         sub=(sub or ""):lower()
         if sub=="award" then
+            if not (MTR.CanAccess and MTR.CanAccess("DKP")) then MTR.MPE("No DKP write permission.") return end
             local n,pts,reason=rest:match("^(%S+)%s+(%d+)%s*(.*)")
             if not n then MTR.MPE("/mek dkp award <n> <pts> [reason]") return end
             MTR.DKPAdd(n,tonumber(pts),reason~="" and reason or "Officer award",MTR.playerName)
             MTR.MP("Awarded "..pts.." to "..n..". Balance: "..MTR.DKPBalance(n))
+            if IsInGuild() and MTR.DKPSyncToRaidSafe then MTR.DKPSyncToRaidSafe() end
         elseif sub=="deduct" then
+            if not (MTR.CanAccess and MTR.CanAccess("DKP")) then MTR.MPE("No DKP write permission.") return end
             local n,pts,reason=rest:match("^(%S+)%s+(%d+)%s*(.*)")
             if not n then MTR.MPE("/mek dkp deduct <n> <pts> [reason]") return end
             MTR.DKPAdd(n,-tonumber(pts),reason~="" and reason or "Officer deduction",MTR.playerName)
             MTR.MP("Deducted "..pts.." from "..n..". Balance: "..MTR.DKPBalance(n))
+            if IsInGuild() and MTR.DKPSyncToRaidSafe then MTR.DKPSyncToRaidSafe() end
         elseif sub=="set" then
             if not MTR.isGM then MTR.MPE("GM only.") return end
             local n,pts=rest:match("^(%S+)%s+(%d+)")
@@ -202,7 +409,7 @@ SlashCmdList["MEKTOWN"]=function(msg)
             MTR.DKPPublish(chan~="" and chan:upper() or nil,target~="" and target or nil)
         elseif sub=="sync" then MTR.DKPSyncToRaid()
         elseif sub=="snapshot" then
-            if not (MTR.isOfficer or MTR.isGM) then MTR.MPE("Officers only.") return end
+            if not (MTR.CanAccess and MTR.CanAccess("DKP")) then MTR.MPE("No DKP snapshot permission.") return end
             if MTR.DKPSendFullSnapshot then MTR.DKPSendFullSnapshot("manual") end
         else MTR.MP("/mek dkp [award|deduct|set|balance|standings|publish|sync|snapshot]") end
 
@@ -295,15 +502,17 @@ SlashCmdList["MEKTOWN"]=function(msg)
         sub=(sub or ""):lower()
         if sub=="scan" then MTR.InactRunScan(false)
         elseif sub=="kick" then
-            if not (MTR.isOfficer or MTR.isGM) then MTR.MPE("Officers and above can use the kick tool.") return end
+            if not (MTR.CanAccess and MTR.CanAccess("Inactive")) then MTR.MPE("No permission for inactive kick tool.") return end
             MTR.InactRunScan(true)
         elseif sub=="debug" then MTR.InactDebugDump()
         elseif sub=="whitelist" then
             local action,name=rest:match("^(%S+)%s+(%S+)")
             action=(action or ""):lower()
             if not name then MTR.MPE("/mek inactive whitelist add/remove <n>") return end
-            if action=="add"    then MTR.db.inactivityWhitelist[name]=true  MTR.MP("Whitelisted: "..name)
-            elseif action=="remove" then MTR.db.inactivityWhitelist[name]=nil MTR.MP("Removed: "..name)
+            if action=="add" then
+                if MTR.InactSetWhitelist and MTR.InactSetWhitelist(name, true) then MTR.MP("Whitelisted: "..name) end
+            elseif action=="remove" then
+                if MTR.InactSetWhitelist and MTR.InactSetWhitelist(name, false) then MTR.MP("Removed: "..name) end
             else MTR.MPE("Use: add or remove") end
         else MTR.MP("/mek inactive [scan|kick|debug|whitelist add/remove <n>]") end
 
@@ -340,4 +549,5 @@ SlashCmdList["MTRID"] = function()
     end
     print("|cff00c0ff[MekTown]|r Guild: |cffffff00" .. tostring(info.guildName or "LOADING...") .. "|r  Realm: |cffffff00" .. tostring(info.realm or "UnknownRealm") .. "|r")
     print("|cff00c0ff[MekTown]|r Guild Key: |cffaaaaaa" .. tostring(info.guildKey or "Unknown|LOADING...") .. "|r")
+    print("|cff00c0ff[MekTown]|r Guild Id: |cffaaaaaa" .. tostring(info.guildId or "(unset)") .. "|r")
 end

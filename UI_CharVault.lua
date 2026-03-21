@@ -30,11 +30,6 @@ local QUALITY_COLORS = {
     [5] = {1.00, 0.50, 0.00},   -- Legendary  (orange)
     [6] = {0.90, 0.80, 0.50},   -- Artifact   (pale gold)
 }
-local QUALITY_HEX = {
-    [0]="|cff9f9f9f",[1]="|cffffffff",[2]="|cff1eff00",
-    [3]="|cff0070dd",[4]="|cffa335ee",[5]="|cffff8000",
-    [6]="|cffe6cc80",
-}
 local EMPTY_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 
 -- ============================================================================
@@ -77,6 +72,15 @@ local function MakeSF(parent,yt,yb)
     sf:SetPoint("BOTTOMRIGHT",parent,"BOTTOMRIGHT",-20,yb or 4)
     local c=CreateFrame("Frame",nil,sf) c:SetSize(890,600) sf:SetScrollChild(c)
     return sf,c
+end
+local BTN = {
+    SM = {100, 22},
+    MD = {120, 24},
+    LG = {140, 28},
+}
+local function SetStdButtonSize(btn, key)
+    local sz = BTN[key or "MD"] or BTN.MD
+    btn:SetSize(sz[1], sz[2])
 end
 local function MakeSearchBar(parent,label,y)
     local lbl=parent:CreateFontString(nil,"OVERLAY","GameFontNormal")
@@ -240,31 +244,34 @@ local function DetailUpdate(strip, itemID, itemName)
 end
 
 -- ============================================================================
+-- TAB REGISTRY  (module-level so event handler can reference them)
+-- ============================================================================
+local _tabFrames   = {}
+local _tabBuilders = {}
+local _tabBuilt    = {}
+
+-- ============================================================================
 -- TAB: OVERVIEW
 -- ============================================================================
 local function BuildOverview(t)
     if not t._sf then
-        local hdr=t:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
-        hdr:SetPoint("TOPLEFT",t,"TOPLEFT",0,-2)
-        hdr:SetPoint("TOPRIGHT",t,"TOPRIGHT",0,-2)
-        hdr:SetJustifyH("CENTER")
-        hdr:SetText(string.format("|cffaaaaaa %-16s  %-12s  Lv  ilvl  %-16s  %-20s  Last Seen|r",
-            "Name","Class","Gold","Zone"))
-        t._hdr=hdr
         local _,c=MakeSF(t,-18,34)
         t._content=c
         local refBtn=CreateFrame("Button",nil,t,"UIPanelButtonTemplate")
-        refBtn:SetSize(80,26) refBtn:SetPoint("BOTTOMRIGHT",t,"BOTTOMRIGHT",0,4)
+        SetStdButtonSize(refBtn, "MD")
+        refBtn:SetPoint("BOTTOMRIGHT",t,"BOTTOMRIGHT",0,4)
         refBtn:SetText("Refresh") refBtn:SetScript("OnClick",function() t:GetScript("OnShow")(t) end)
         local scanBtn=CreateFrame("Button",nil,t,"UIPanelButtonTemplate")
-        scanBtn:SetSize(110,26) scanBtn:SetPoint("RIGHT",refBtn,"LEFT",-4,0)
+        SetStdButtonSize(scanBtn, "LG")
+        scanBtn:SetPoint("RIGHT",refBtn,"LEFT",-6,0)
         scanBtn:SetText("Scan This Alt")
         scanBtn:SetScript("OnClick",function()
             if MTR.CharVault then MTR.CharVault.ScanCharacter() end
             t:GetScript("OnShow")(t)
         end)
         local clearBtn=CreateFrame("Button",nil,t,"UIPanelButtonTemplate")
-        clearBtn:SetSize(120,26) clearBtn:SetPoint("RIGHT",scanBtn,"LEFT",-4,0)
+        SetStdButtonSize(clearBtn, "LG")
+        clearBtn:SetPoint("RIGHT",scanBtn,"LEFT",-6,0)
         clearBtn:SetText("Remove This Alt")
         clearBtn:SetScript("OnClick",function()
             if not MekTownRecruitDB.charVault then return end
@@ -276,6 +283,13 @@ local function BuildOverview(t)
     local c=t._content
     local chars=MTR.CharVault and MTR.CharVault.GetAll() or {}
     local ROW_H=22
+    local X_NAME, W_NAME = 8, 150
+    local X_CLASS, W_CLASS = 164, 110
+    local X_LVL, W_LVL = 280, 40
+    local X_ILVL, W_ILVL = 326, 52
+    local X_GOLD, W_GOLD = 384, 120
+    local X_ZONE, W_ZONE = 510, 220
+    local X_SEEN, W_SEEN = 736, 146
     if #chars==0 then
         PoolHide(c,1)
         local row=PoolGet(c,1,890,ROW_H,ROW_H) RowBG(row,1)
@@ -283,19 +297,58 @@ local function BuildOverview(t)
         fs:SetText("|cffaaaaaa No characters scanned yet. Log in on each alt to populate.|r")
         c:SetHeight(50) return
     end
+    local hrow=PoolGet(c,1,890,ROW_H,ROW_H)
+    if not hrow._bg then hrow._bg=hrow:CreateTexture(nil,"BACKGROUND") hrow._bg:SetAllPoints(hrow) end
+    hrow._bg:SetColorTexture(0.16,0.06,0.06,0.90)
+    local hName = FS(hrow,"_hName","GameFontNormalSmall")
+    hName:SetPoint("LEFT",hrow,"LEFT",X_NAME,0) hName:SetWidth(W_NAME) hName:SetJustifyH("LEFT") hName:SetText("Name")
+    local hClass = FS(hrow,"_hClass","GameFontNormalSmall")
+    hClass:SetPoint("LEFT",hrow,"LEFT",X_CLASS,0) hClass:SetWidth(W_CLASS) hClass:SetJustifyH("LEFT") hClass:SetText("Class")
+    local hLvl = FS(hrow,"_hLvl","GameFontNormalSmall")
+    hLvl:SetPoint("LEFT",hrow,"LEFT",X_LVL,0) hLvl:SetWidth(W_LVL) hLvl:SetJustifyH("RIGHT") hLvl:SetText("Lv")
+    local hIlvl = FS(hrow,"_hIlvl","GameFontNormalSmall")
+    hIlvl:SetPoint("LEFT",hrow,"LEFT",X_ILVL,0) hIlvl:SetWidth(W_ILVL) hIlvl:SetJustifyH("RIGHT") hIlvl:SetText("iLvl")
+    local hGold = FS(hrow,"_hGold","GameFontNormalSmall")
+    hGold:SetPoint("LEFT",hrow,"LEFT",X_GOLD,0) hGold:SetWidth(W_GOLD) hGold:SetJustifyH("RIGHT") hGold:SetText("Gold")
+    local hZone = FS(hrow,"_hZone","GameFontNormalSmall")
+    hZone:SetPoint("LEFT",hrow,"LEFT",X_ZONE,0) hZone:SetWidth(W_ZONE) hZone:SetJustifyH("LEFT") hZone:SetText("Zone")
+    local hSeen = FS(hrow,"_hSeen","GameFontNormalSmall")
+    hSeen:SetPoint("LEFT",hrow,"LEFT",X_SEEN,0) hSeen:SetWidth(W_SEEN) hSeen:SetJustifyH("LEFT") hSeen:SetText("Last Seen")
+
     for i,ch in ipairs(chars) do
-        local row=PoolGet(c,i,890,ROW_H,ROW_H) RowBG(row,i)
+        local row=PoolGet(c,i+1,890,ROW_H,ROW_H) RowBG(row,i)
         local cc=ClassCol(ch.class)
         local gold=MTR.CharVault and MTR.CharVault.FormatGold(ch.gold or 0) or "0g"
-        local fs=FS(row,"_line","GameFontHighlightSmall")
-        fs:SetPoint("LEFT",row,"LEFT",4,0) fs:SetWidth(890) fs:SetWordWrap(false)
-        fs:SetText(string.format("%s%-16s|r  %-12s  %2d  %4d  %-16s  %-20s  %s",
-            cc,MTR.Trunc(ch.name or "?",16),MTR.Trunc(ch.class or "?",12),
-            ch.level or 0,ch.avgIlvl or 0,MTR.Trunc(gold,16),
-            MTR.Trunc(ch.zone or "?",20),ch.lastSeen or "?"))
+        local cName = FS(row,"_cName","GameFontHighlightSmall")
+        cName:SetPoint("LEFT",row,"LEFT",X_NAME,0) cName:SetWidth(W_NAME) cName:SetJustifyH("LEFT")
+        cName:SetText(string.format("%s%s|r", cc, MTR.Trunc(ch.name or "?", 18)))
+
+        local cClass = FS(row,"_cClass","GameFontHighlightSmall")
+        cClass:SetPoint("LEFT",row,"LEFT",X_CLASS,0) cClass:SetWidth(W_CLASS) cClass:SetJustifyH("LEFT")
+        cClass:SetText(MTR.Trunc(ch.class or "?", 12))
+
+        local cLvl = FS(row,"_cLvl","GameFontHighlightSmall")
+        cLvl:SetPoint("LEFT",row,"LEFT",X_LVL,0) cLvl:SetWidth(W_LVL) cLvl:SetJustifyH("RIGHT")
+        cLvl:SetText(tostring(ch.level or 0))
+
+        local cIlvl = FS(row,"_cIlvl","GameFontHighlightSmall")
+        cIlvl:SetPoint("LEFT",row,"LEFT",X_ILVL,0) cIlvl:SetWidth(W_ILVL) cIlvl:SetJustifyH("RIGHT")
+        cIlvl:SetText(tostring(ch.avgIlvl or 0))
+
+        local cGold = FS(row,"_cGold","GameFontHighlightSmall")
+        cGold:SetPoint("LEFT",row,"LEFT",X_GOLD,0) cGold:SetWidth(W_GOLD) cGold:SetJustifyH("RIGHT")
+        cGold:SetText(gold)
+
+        local cZone = FS(row,"_cZone","GameFontHighlightSmall")
+        cZone:SetPoint("LEFT",row,"LEFT",X_ZONE,0) cZone:SetWidth(W_ZONE) cZone:SetJustifyH("LEFT")
+        cZone:SetText(MTR.Trunc(ch.zone or "?", 30))
+
+        local cSeen = FS(row,"_cSeen","GameFontHighlightSmall")
+        cSeen:SetPoint("LEFT",row,"LEFT",X_SEEN,0) cSeen:SetWidth(W_SEEN) cSeen:SetJustifyH("LEFT")
+        cSeen:SetText(MTR.Trunc(ch.lastSeen or "?", 22))
     end
-    PoolHide(c,#chars+1)
-    c:SetHeight(math.max(500,#chars*ROW_H+10))
+    PoolHide(c,#chars+2)
+    c:SetHeight(math.max(500,(#chars+1)*ROW_H+10))
 end
 
 -- ============================================================================
@@ -447,7 +500,6 @@ local function BuildBrowseBags(t)
                 c2:SetHeight(50) return
             end
 
-            local totalCopper=0
             local charName=(entry.meta and entry.meta.name) or entry.name or "?"
             t._statusFS:SetText(string.format(
                 "|cffaaaaaa%s — %d unique item%s in %s|r",
@@ -604,6 +656,11 @@ local function BuildGold(t)
     local chars=MTR.CharVault and MTR.CharVault.GetGoldSorted() or {}
     local c=t._content
     local ROW_H=26
+    local X_NAME, W_NAME = 8, 180
+    local X_CLASS, W_CLASS = 194, 110
+    local X_LEVEL, W_LEVEL = 310, 50
+    local X_GOLD, W_GOLD = 366, 160
+    local X_SHARE, W_SHARE = 532, 350
     if #chars==0 then
         PoolHide(c,1)
         local row=PoolGet(c,1,890,ROW_H,ROW_H) RowBG(row,1)
@@ -614,24 +671,56 @@ local function BuildGold(t)
     local richest=(chars[1] and chars[1].gold) or 1
     local hrow=PoolGet(c,1,890,ROW_H,ROW_H)
     if not hrow._bg then hrow._bg=hrow:CreateTexture(nil,"BACKGROUND") hrow._bg:SetAllPoints(hrow) end
-    hrow._bg:SetColorTexture(0.14,0.11,0.03,0.9)
-    local hfs=FS(hrow,"_line","GameFontNormal")
-    hfs:SetPoint("LEFT",hrow,"LEFT",4,0) hfs:SetWidth(890) hfs:SetWordWrap(false)
-    hfs:SetText(string.format("|cffd4af37TOTAL ACROSS %d ALTS|r   |cffd4af37%s|r",
-        #chars,MTR.CharVault and MTR.CharVault.FormatGold(total) or "0g"))
+    hrow._bg:SetColorTexture(0.16,0.06,0.06,0.90)
+    local hName = FS(hrow,"_hName","GameFontNormalSmall")
+    hName:SetPoint("LEFT",hrow,"LEFT",X_NAME,0) hName:SetWidth(W_NAME) hName:SetJustifyH("LEFT") hName:SetText("Name")
+    local hClass = FS(hrow,"_hClass","GameFontNormalSmall")
+    hClass:SetPoint("LEFT",hrow,"LEFT",X_CLASS,0) hClass:SetWidth(W_CLASS) hClass:SetJustifyH("LEFT") hClass:SetText("Class")
+    local hLevel = FS(hrow,"_hLevel","GameFontNormalSmall")
+    hLevel:SetPoint("LEFT",hrow,"LEFT",X_LEVEL,0) hLevel:SetWidth(W_LEVEL) hLevel:SetJustifyH("RIGHT") hLevel:SetText("Lv")
+    local hGold = FS(hrow,"_hGold","GameFontNormalSmall")
+    hGold:SetPoint("LEFT",hrow,"LEFT",X_GOLD,0) hGold:SetWidth(W_GOLD) hGold:SetJustifyH("RIGHT") hGold:SetText("Gold")
+    local hShare = FS(hrow,"_hShare","GameFontNormalSmall")
+    hShare:SetPoint("LEFT",hrow,"LEFT",X_SHARE,0) hShare:SetWidth(W_SHARE) hShare:SetJustifyH("LEFT") hShare:SetText("Share")
+
+    local trow=PoolGet(c,2,890,ROW_H,ROW_H)
+    if not trow._bg then trow._bg=trow:CreateTexture(nil,"BACKGROUND") trow._bg:SetAllPoints(trow) end
+    trow._bg:SetColorTexture(0.14,0.11,0.03,0.9)
+    local tLbl = FS(trow,"_totalLbl","GameFontNormal")
+    tLbl:SetPoint("LEFT",trow,"LEFT",X_NAME,0) tLbl:SetWidth(500) tLbl:SetJustifyH("LEFT")
+    tLbl:SetText(string.format("|cffd4af37TOTAL ACROSS %d ALTS|r", #chars))
+    local tVal = FS(trow,"_totalVal","GameFontNormal")
+    tVal:SetPoint("LEFT",trow,"LEFT",X_GOLD,0) tVal:SetWidth(W_GOLD) tVal:SetJustifyH("RIGHT")
+    tVal:SetText(string.format("|cffd4af37%s|r", MTR.CharVault and MTR.CharVault.FormatGold(total) or "0g"))
     for i,ch in ipairs(chars) do
-        local row=PoolGet(c,i+1,890,ROW_H,ROW_H) RowBG(row,i)
+        local row=PoolGet(c,i+2,890,ROW_H,ROW_H) RowBG(row,i)
         local cc=ClassCol(ch.class)
-        local bar=richest>0 and math.floor(((ch.gold or 0)/richest)*36) or 0
-        local fs=FS(row,"_line","GameFontHighlightSmall")
-        fs:SetPoint("LEFT",row,"LEFT",4,0) fs:SetWidth(890) fs:SetWordWrap(false)
-        fs:SetText(string.format("%s%-16s|r  %-12s  Lv%2d  |cffd4af37%16s|r  |cff554400%s|r",
-            cc,MTR.Trunc(ch.name or "?",16),MTR.Trunc(ch.class or "?",12),
-            ch.level or 0,MTR.CharVault and MTR.CharVault.FormatGold(ch.gold or 0) or "0g",
-            string.rep("█",bar)))
+        local goldVal = ch.gold or 0
+        local sharePct = total > 0 and ((goldVal / total) * 100) or 0
+        local barCount = richest > 0 and math.floor((goldVal / richest) * 28) or 0
+
+        local cName = FS(row,"_cName","GameFontHighlightSmall")
+        cName:SetPoint("LEFT",row,"LEFT",X_NAME,0) cName:SetWidth(W_NAME) cName:SetJustifyH("LEFT")
+        cName:SetText(string.format("%s%s|r", cc, MTR.Trunc(ch.name or "?", 20)))
+
+        local cClass = FS(row,"_cClass","GameFontHighlightSmall")
+        cClass:SetPoint("LEFT",row,"LEFT",X_CLASS,0) cClass:SetWidth(W_CLASS) cClass:SetJustifyH("LEFT")
+        cClass:SetText(MTR.Trunc(ch.class or "?", 12))
+
+        local cLevel = FS(row,"_cLevel","GameFontHighlightSmall")
+        cLevel:SetPoint("LEFT",row,"LEFT",X_LEVEL,0) cLevel:SetWidth(W_LEVEL) cLevel:SetJustifyH("RIGHT")
+        cLevel:SetText(tostring(ch.level or 0))
+
+        local cGold = FS(row,"_cGold","GameFontHighlightSmall")
+        cGold:SetPoint("LEFT",row,"LEFT",X_GOLD,0) cGold:SetWidth(W_GOLD) cGold:SetJustifyH("RIGHT")
+        cGold:SetText(MTR.CharVault and MTR.CharVault.FormatGold(goldVal) or "0g")
+
+        local cShare = FS(row,"_cShare","GameFontHighlightSmall")
+        cShare:SetPoint("LEFT",row,"LEFT",X_SHARE,0) cShare:SetWidth(W_SHARE) cShare:SetJustifyH("LEFT")
+        cShare:SetText(string.format("|cffaaaaaa%4.1f%%|r  |cff554400%s|r", sharePct, string.rep("█", barCount)))
     end
-    PoolHide(c,#chars+2)
-    c:SetHeight(math.max(500,(#chars+1)*ROW_H+10))
+    PoolHide(c,#chars+3)
+    c:SetHeight(math.max(500,(#chars+2)*ROW_H+10))
 end
 
 -- ============================================================================
@@ -681,15 +770,29 @@ local function BuildEquipment(t)
             end
             t._avgFS:SetText("  Avg ilvl: |cffd4af37"..(entry.avgIlvl or 0).."|r")
             local gear=entry.gear or {}
+            local hrow=PoolGet(c2,1,890,22,22)
+            if not hrow._bg then hrow._bg=hrow:CreateTexture(nil,"BACKGROUND") hrow._bg:SetAllPoints(hrow) end
+            hrow._bg:SetColorTexture(0.16,0.06,0.06,0.90)
+            local hSlot = FS(hrow,"_hSlot","GameFontNormalSmall")
+            hSlot:SetPoint("LEFT",hrow,"LEFT",8,0) hSlot:SetWidth(160) hSlot:SetJustifyH("LEFT") hSlot:SetText("Slot")
+            local hItem = FS(hrow,"_hItem","GameFontNormalSmall")
+            hItem:SetPoint("LEFT",hrow,"LEFT",176,0) hItem:SetWidth(560) hItem:SetJustifyH("LEFT") hItem:SetText("Item")
+            local hIlvl = FS(hrow,"_hIlvl","GameFontNormalSmall")
+            hIlvl:SetPoint("LEFT",hrow,"LEFT",744,0) hIlvl:SetWidth(80) hIlvl:SetJustifyH("RIGHT") hIlvl:SetText("iLvl")
             local idx=0
             for _,sd in ipairs(GEAR_SLOTS) do
                 local sid,sname=sd[1],sd[2]
                 local item=gear[sid]
                 idx=idx+1
-                local row=PoolGet(c2,idx,890,22,22) RowBG(row,idx)
+                local row=PoolGet(c2,idx+1,890,22,22) RowBG(row,idx)
                 row:EnableMouse(true)   -- required for OnEnter to fire
-                local fs=FS(row,"_line","GameFontHighlightSmall")
-                fs:SetPoint("LEFT",row,"LEFT",4,0) fs:SetWidth(890) fs:SetWordWrap(false)
+                local slotFS=FS(row,"_slot","GameFontHighlightSmall")
+                slotFS:SetPoint("LEFT",row,"LEFT",8,0) slotFS:SetWidth(160) slotFS:SetJustifyH("LEFT")
+                slotFS:SetText(sname)
+                local itemFS=FS(row,"_item","GameFontHighlightSmall")
+                itemFS:SetPoint("LEFT",row,"LEFT",176,0) itemFS:SetWidth(560) itemFS:SetJustifyH("LEFT")
+                local ilvlFS=FS(row,"_ilvl","GameFontHighlightSmall")
+                ilvlFS:SetPoint("LEFT",row,"LEFT",744,0) ilvlFS:SetWidth(80) ilvlFS:SetJustifyH("RIGHT")
                 if item and item.link then
                     local name=MTR.ItemLinkToName(item.link)
                     local qualColor="|cffffffff"
@@ -698,8 +801,8 @@ local function BuildEquipment(t)
                         local qc=ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[rarity]
                         if qc then qualColor=string.format("|cff%02x%02x%02x",qc.r*255,qc.g*255,qc.b*255) end
                     end
-                    fs:SetText(string.format("  %-14s  %s%s|r  |cffaaaaaa(%d ilvl)|r",
-                        sname,qualColor,MTR.Trunc(name,40),item.ilvl or 0))
+                    itemFS:SetText(string.format("%s%s|r", qualColor, MTR.Trunc(name, 58)))
+                    ilvlFS:SetText(tostring(item.ilvl or 0))
                     -- Native item tooltip on hover (our WAAAGH injection appends vault lines)
                     do local lnk=item.link
                         row:SetScript("OnEnter",function(self)
@@ -710,12 +813,13 @@ local function BuildEquipment(t)
                         row:SetScript("OnLeave",function() GameTooltip:Hide() end)
                     end
                 else
-                    fs:SetText(string.format("  %-14s  |cff444444(empty)|r",sname))
+                    itemFS:SetText("|cff444444(empty)|r")
+                    ilvlFS:SetText("-")
                     row:SetScript("OnEnter",nil)
                     row:SetScript("OnLeave",nil)
                 end
             end
-            PoolHide(c2,idx+1) c2:SetHeight(math.max(500,idx*22+10))
+            PoolHide(c2,idx+2) c2:SetHeight(math.max(500,(idx+1)*22+10))
         end
     end
     if t._populateDD then t._populateDD() end
@@ -758,19 +862,65 @@ local function LedgerDisplayDate(e)
         return tostring(e.dateText or "?")
     end
 
-    local dateText = tostring(e.dateText or "")
-    local ts = tonumber(e.epoch) or 0
-    if ts > 0 then
-        return LedgerRelativeAge(ts)
+    local conf = tostring(e.timeConfidence or "")
+    local derived = tonumber(e.epoch) or 0
+    local firstSeen = tonumber(e.firstSeenEpoch) or 0
+    if conf ~= "first_seen" and derived > 0 then
+        local age = math.max(0, time() - derived)
+        if age < 86400 then
+            return date("%H:%M", derived)
+        end
+        local days = math.max(1, math.floor(age / 86400))
+        return tostring(days) .. " day" .. (days == 1 and "" or "s") .. " ago"
+    end
+    if firstSeen > 0 then
+        local age = math.max(0, time() - firstSeen)
+        if age < 86400 then
+            return date("%H:%M", firstSeen)
+        end
+        local days = math.max(1, math.floor(age / 86400))
+        return tostring(days) .. " day" .. (days == 1 and "" or "s") .. " ago"
     end
 
+    local dateText = tostring(e.dateText or "")
+    local dateTextLower = string.lower(dateText)
+    local hasUnknownDateText = dateTextLower:find("unknown", 1, true) and true or false
     if dateText ~= "" and string.lower(dateText) ~= "recent" then
+        if hasUnknownDateText and (tonumber(e.epoch) or 0) > 0 then
+            return date("%d/%m/%Y %H:%M", tonumber(e.epoch) or 0)
+        end
+        if e.relativeText and e.relativeText ~= "" and (tonumber(e.scanEpoch) or 0) > 0 then
+            local ageSinceScan = math.max(0, time() - (tonumber(e.scanEpoch) or 0))
+            if ageSinceScan < 86400 then
+                return tostring(e.relativeText)
+            end
+        end
         return dateText
+    end
+    local ts = tonumber(e.epoch) or 0
+    if e.relativeText and e.relativeText ~= "" and ts > 0 then
+        return LedgerRelativeAge(ts)
     end
     if e.scanTS and e.scanTS ~= "" then
         return tostring(e.scanTS)
     end
     return "?"
+end
+
+local function LedgerSortEpoch(e)
+    if type(e) ~= "table" then return 0 end
+    local hasExactDate = e.hasExactDate == true or e.hasExactDate == 1 or e.hasExactDate == "1"
+    if hasExactDate then
+        local exact = tonumber(e.epoch) or 0
+        if exact > 0 then return exact end
+    end
+    local conf = tostring(e.timeConfidence or "")
+    local derived = tonumber(e.epoch) or 0
+    if conf ~= "first_seen" and derived > 0 then return derived end
+    local firstSeen = tonumber(e.firstSeenEpoch) or 0
+    if firstSeen > 0 then return firstSeen end
+    if derived > 0 then return derived end
+    return tonumber(e.scanEpoch) or 0
 end
 
 local function LedgerTypeColor(txType)
@@ -950,7 +1100,7 @@ local function BuildGuildBank(t)
         end
 
         local exportBtn = CreateFrame("Button", nil, top, "UIPanelButtonTemplate")
-        exportBtn:SetSize(88, 22)
+        SetStdButtonSize(exportBtn, "SM")
         exportBtn:SetPoint("TOPRIGHT", top, "TOPRIGHT", -114, -42)
         exportBtn:SetText("Export Txt")
         exportBtn:SetScript("OnClick", function()
@@ -965,16 +1115,16 @@ local function BuildGuildBank(t)
         exportBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
         t._exportBtn = exportBtn
 
-        if MTR.isOfficer then
+        if IsInGuild() then
             local scanBtn = CreateFrame("Button", nil, top, "UIPanelButtonTemplate")
-            scanBtn:SetSize(110, 22)
+            SetStdButtonSize(scanBtn, "MD")
             scanBtn:SetPoint("TOPRIGHT", top, "TOPRIGHT", 0, -42)
             scanBtn:SetText("|cffd4af37Scan Now|r")
             scanBtn:SetScript("OnClick", function()
                 if MTR.GuildBankScan and MTR.GuildBankScan.DoScan then
                     MTR.GuildBankScan.DoScan()
                     if t._infoFS then
-                        t._infoFS:SetText("|cffaaaaaaScanning bank inventory + ledger... open each tab once for best results.|r")
+                        t._infoFS:SetText("|cffaaaaaaScanning inventory + ledger... one-time log sweep will temporarily flip bank tabs, then restore your original tab.|r")
                     end
                 end
             end)
@@ -982,7 +1132,7 @@ local function BuildGuildBank(t)
                 GameTooltip:SetOwner(self, "ANCHOR_BOTTOMLEFT")
                 GameTooltip:AddLine("Scan Guild Bank + Ledger")
                 GameTooltip:AddLine("|cffaaaaaaRequires the guild bank to already be open.|r", 1, 1, 1)
-                GameTooltip:AddLine("|cffaaaaaaReads current item tabs and limited transaction logs, then syncs them.|r", 1, 1, 1)
+                GameTooltip:AddLine("|cffaaaaaaPerforms one controlled log sweep for better in-game timestamp capture, then restores your tab.|r", 1, 1, 1)
                 GameTooltip:Show()
             end)
             scanBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -999,28 +1149,28 @@ local function BuildGuildBank(t)
         t._content = c
     end
 
-    local _gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or MekTownRecruitDB
-    local bank = _gs.guildBank or MekTownRecruitDB.guildBank or {}
-    local ledger = ((_gs.guildBankLedger or MekTownRecruitDB.guildBankLedger) and ((_gs.guildBankLedger or MekTownRecruitDB.guildBankLedger).entries)) or {}
-    local meta = MTR.GuildBankLedger and MTR.GuildBankLedger.GetMeta and MTR.GuildBankLedger.GetMeta() or {}
-
-    if t._mode == "Ledger" then
-        UIDropDownMenu_SetText(t._dd, ({ ["1d"]="Last 24 hours", ["3d"]="Last 3 days", ["7d"]="Last 7 days", ["14d"]="Last 14 days", ["30d"]="Last 30 days", ["all"]="All stored" })[t._range or "1d"] or "Last 24 hours")
-        t._infoFS:SetText(string.format("|cffaaaaaa Ledger: |cffd4af37%d entries|r  |cffaaaaaaretained up to 30 days • search matches actor/item/action/tab/scanner • last sync %s by %s|r", #ledger, meta.lastSyncAt or meta.lastScanAt or "never", meta.lastSyncFrom or meta.lastScanBy or "?"))
-    else
-        if t._summaryFS then t._summaryFS:SetText("|cffaaaaaaUse search + category filtering to browse the current guild bank snapshot.|r") end
-        UIDropDownMenu_SetText(t._dd, t._category == "All" and "All categories" or (t._category or "All categories"))
-        if #bank > 0 then
-            local sample = bank[1]
-            t._infoFS:SetText(string.format("|cffaaaaaa Snapshot: |cffd4af37%d items|r  |cffaaaaaa— scanned by |r|cffffd700%s|r |cffaaaaaaat %s|r  |cff444444(auto-updates when anyone opens the bank)|r", #bank, sample and sample.scannedBy or "?", sample and sample.updated or "?"))
-        else
-            t._infoFS:SetText("|cffaaaaaaNo snapshot yet — an officer needs to open the guild bank once.|r")
-        end
-    end
-
     local function Refresh()
         if MTR.GuildBankScan then MTR.GuildBankScan.dirty = false end
         if MTR.GuildBankLedger then MTR.GuildBankLedger.dirty = false end
+        local _gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or MekTownRecruitDB
+        local bank = (MTR.GetGuildBankSnapshot and MTR.GetGuildBankSnapshot()) or _gs.guildBank or MekTownRecruitDB.guildBank or {}
+        local ledger = ((_gs.guildBankLedger or MekTownRecruitDB.guildBankLedger) and ((_gs.guildBankLedger or MekTownRecruitDB.guildBankLedger).entries)) or {}
+        local meta = MTR.GuildBankLedger and MTR.GuildBankLedger.GetMeta and MTR.GuildBankLedger.GetMeta() or {}
+
+        if t._mode == "Ledger" then
+            UIDropDownMenu_SetText(t._dd, ({ ["1d"]="Last 24 hours", ["3d"]="Last 3 days", ["7d"]="Last 7 days", ["14d"]="Last 14 days", ["30d"]="Last 30 days", ["all"]="All stored" })[t._range or "1d"] or "Last 24 hours")
+            t._infoFS:SetText(string.format("|cffaaaaaa Ledger: |cffd4af37%d entries|r  |cffaaaaaaretained up to 30 days • search matches actor/item/action/tab/scanner • last sync %s by %s|r", #ledger, meta.lastSyncAt or meta.lastScanAt or "never", meta.lastSyncFrom or meta.lastScanBy or "?"))
+        else
+            if t._summaryFS then t._summaryFS:SetText("|cffaaaaaaUse search + category filtering to browse the current guild bank snapshot.|r") end
+            UIDropDownMenu_SetText(t._dd, t._category == "All" and "All categories" or (t._category or "All categories"))
+            if #bank > 0 then
+                local sample = bank[1]
+                t._infoFS:SetText(string.format("|cffaaaaaa Snapshot: |cffd4af37%d items|r  |cffaaaaaa— scanned by |r|cffffd700%s|r |cffaaaaaaat %s|r  |cff444444(auto-updates when anyone opens the bank)|r", #bank, sample and sample.scannedBy or "?", sample and sample.updated or "?"))
+            else
+                t._infoFS:SetText("|cffaaaaaaNo snapshot yet — open the guild bank once to capture inventory.|r")
+            end
+        end
+
         local q = string.lower(t._query or "")
         local c = t._content
         local detail = t._detail
@@ -1033,15 +1183,23 @@ local function BuildGuildBank(t)
             local cutoff = time() - (days * 86400)
             local rows = {}
             for _, e in ipairs((MTR.GuildBankLedger and MTR.GuildBankLedger.GetEntries and MTR.GuildBankLedger.GetEntries()) or ledger) do
+                local eEpoch = LedgerSortEpoch(e)
                 local hay = string.lower(table.concat({
                     tostring(e.dateText or ""), tostring(e.actor or ""), tostring(e.txType or ""),
                     tostring(e.itemName or ""), tostring(e.tab1 or ""), tostring(e.tab2 or ""), tostring(e.scanBy or ""), tostring(e.count or "")
                 }, " "))
-                if (days >= 9999 or (tonumber(e.epoch) or 0) >= cutoff) and (q == "" or hay:find(q, 1, true)) then
+                local inRange = (days >= 9999) or (eEpoch > 0 and eEpoch >= cutoff) or (eEpoch <= 0)
+                if inRange and (q == "" or hay:find(q, 1, true)) then
                     rows[#rows + 1] = e
                 end
             end
-            table.sort(rows, function(a, b) return (tonumber(a.epoch) or 0) > (tonumber(b.epoch) or 0) end)
+            table.sort(rows, function(a, b)
+                local ae, be = LedgerSortEpoch(a), LedgerSortEpoch(b)
+                if ae == be then
+                    return tostring(a.scanTS or "") > tostring(b.scanTS or "")
+                end
+                return ae > be
+            end)
             t._ledgerRows = rows
             do
                 local deposits, withdrawals, moved, actors = 0, 0, 0, {}
@@ -1297,13 +1455,6 @@ infoFrame:SetScript("OnEvent",function(_,_,itemID)
 end)
 
 -- ============================================================================
--- TAB REGISTRY  (module-level so event handler can reference them)
--- ============================================================================
-local _tabFrames   = {}
-local _tabBuilders = {}
-local _tabBuilt    = {}
-
--- ============================================================================
 -- WINDOW
 -- ============================================================================
 function MTR.OpenCharVaultToTab(tabName)
@@ -1323,6 +1474,7 @@ function MTR.OpenCharVault()
         vaultWin:SetSize(VAULT_W,VAULT_H)
         vaultWin:SetPoint("CENTER")
         vaultWin:SetFrameStrata("MEDIUM")
+        if vaultWin.SetClipsChildren then vaultWin:SetClipsChildren(true) end
         vaultWin:SetBackdrop({
             bgFile="",
             edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -1349,7 +1501,7 @@ function MTR.OpenCharVault()
 
         -- Back to Config button — closes vault and reopens the config window
         local backBtn=CreateFrame("Button",nil,vaultWin,"UIPanelButtonTemplate")
-        backBtn:SetSize(136,24)
+        SetStdButtonSize(backBtn, "MD")
         backBtn:SetPoint("TOPRIGHT",vaultWin,"TOPRIGHT",-44,-6)
         backBtn:SetText("|cffaaaaaaBack to Config|r")
         backBtn:SetScript("OnClick",function()
@@ -1389,34 +1541,52 @@ function MTR.OpenCharVault()
         -- ── Tabs ───────────────────────────────────────────────────────────
         local TABS={"Overview","Browse Bags","Item Search",
                     "Gold","Equipment","Guild Bank","Guild Tree"}
-        local tabBtns={}
-        for i,tname in ipairs(TABS) do
+        local TAB_LABELS = {
+            ["Overview"] = "Overview",
+            ["Browse Bags"] = "Bags",
+            ["Item Search"] = "Search",
+            ["Gold"] = "Gold",
+            ["Equipment"] = "Gear",
+            ["Guild Bank"] = "Guild Bank",
+            ["Guild Tree"] = "Guild Tree",
+        }
+        local tabGap = 6
+        local tabX = 10
+        for _,tname in ipairs(TABS) do
             local f=CreateFrame("Frame",nil,vaultWin)
             f:SetPoint("TOPLEFT",    vaultWin,"TOPLEFT",    10,-80)
             f:SetPoint("BOTTOMRIGHT",vaultWin,"BOTTOMRIGHT",-10,10)
+            if f.SetClipsChildren then f:SetClipsChildren(true) end
             f:Hide()
             _tabFrames[tname]=f
 
-            local bw = tname=="Guild Tree" and 84 or tname=="Guild Bank" and 96 or tname=="Browse Bags" and 96 or 90
             local btn=CreateFrame("Button",nil,vaultWin,"UIPanelButtonTemplate")
-            btn:SetSize(bw,24)
-            if i==1 then btn:SetPoint("TOPLEFT",vaultWin,"TOPLEFT",10,-56)
-            else          btn:SetPoint("LEFT",tabBtns[i-1],"RIGHT",3,0) end
-            if tname=="Guild Bank" then
-                btn:SetText("|cffd4af37Guild Bank|r")
-            else
-                btn:SetText(tname)
+            btn:SetHeight(24)
+            btn:SetPoint("TOPLEFT",vaultWin,"TOPLEFT",tabX,-56)
+            btn:SetText(TAB_LABELS[tname] or tname)
+            do
+                local fs = btn.GetFontString and btn:GetFontString()
+                local textW = (fs and fs.GetStringWidth and fs:GetStringWidth()) or 80
+                local w = math.max(78, math.min(120, math.floor(textW + 22)))
+                btn:SetWidth(w)
             end
+            tabX = tabX + btn:GetWidth() + tabGap
             local key=tname
             btn:SetScript("OnClick",function()
                 for _,fr in pairs(_tabFrames) do fr:Hide() end
-                if _tabBuilders[key] and not _tabBuilt[key] then
-                    _tabBuilders[key](_tabFrames[key])
-                    _tabBuilt[key]=true
-                end
-                _tabFrames[key]:Show()
-            end)
-            tabBtns[i]=btn
+                local builtNow = false
+            if _tabBuilders[key] and not _tabBuilt[key] then
+                _tabBuilders[key](_tabFrames[key])
+                _tabBuilt[key]=true
+                builtNow = true
+            end
+            _tabFrames[key]:Show()
+            if _tabFrames[key]._refresh then _tabFrames[key]._refresh() end
+            if MTR.ScheduleBoundsValidation and (builtNow or not _tabFrames[key]._mtrBoundsChecked) then
+                _tabFrames[key]._mtrBoundsChecked = true
+                MTR.ScheduleBoundsValidation(_tabFrames[key], "Vault/" .. tostring(key), 2, 0.05)
+            end
+        end)
         end
 
         -- Auto-refresh live tabs
@@ -1427,6 +1597,9 @@ function MTR.OpenCharVault()
             if s._show then s._show() end
         end)
         _tabFrames["Item Search"]:SetScript("OnShow",  function(s)
+            if s._refresh then s._refresh() end
+        end)
+        _tabFrames["Guild Bank"]:SetScript("OnShow",  function(s)
             if s._refresh then s._refresh() end
         end)
 
@@ -1445,11 +1618,20 @@ function MTR.OpenCharVault()
 
         vaultWin._showTab=function(name)
             for _,fr in pairs(_tabFrames) do fr:Hide() end
+            local builtNow = false
             if _tabBuilders[name] and not _tabBuilt[name] then
                 _tabBuilders[name](_tabFrames[name])
                 _tabBuilt[name]=true
+                builtNow = true
             end
-            if _tabFrames[name] then _tabFrames[name]:Show() end
+            if _tabFrames[name] then
+                _tabFrames[name]:Show()
+                if _tabFrames[name]._refresh then _tabFrames[name]._refresh() end
+                if MTR.ScheduleBoundsValidation and (builtNow or not _tabFrames[name]._mtrBoundsChecked) then
+                    _tabFrames[name]._mtrBoundsChecked = true
+                    MTR.ScheduleBoundsValidation(_tabFrames[name], "Vault/" .. tostring(name), 2, 0.05)
+                end
+            end
         end
 
         MTR.vaultWin=vaultWin

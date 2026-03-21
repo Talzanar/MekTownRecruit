@@ -207,7 +207,7 @@ local function MergeItems(entry, slotKey, payload)
     entry.itemLinks = entry.itemLinks or {}
     entry.itemTextures = entry.itemTextures or {}
     -- First zero out all existing entries for this slot type
-    for id, slots in pairs(entry.items) do
+    for _, slots in pairs(entry.items) do
         slots[slotKey] = 0
     end
     -- Write new values
@@ -268,7 +268,6 @@ end
 -- ============================================================================
 -- BAG UPDATE SCAN  (debounced — at most once every 3s, never in combat)
 -- ============================================================================
-local bagDirty = false
 
 local function DoBagScan()
     if not MTR.initialized then return end
@@ -381,18 +380,16 @@ local function ScanGuildBank()
                 -- count is the SECOND return value — was incorrectly reading the third
                 local _, count = GetGuildBankItemInfo(tab, slot)
                 count = tonumber(count) or 1
-                local name = GetItemInfo(link)
-                if name then
-                    local texture = select(10, GetItemInfo(link))
-                    items[#items+1] = {
-                        name    = name,
-                        link    = link,
-                        texture = texture,
-                        count   = count,
-                        tab     = tab,
-                        tabName = tabName,
-                    }
-                end
+                local name = GetItemInfo(link) or (link:match("%[(.-)%]") or "Unknown")
+                local texture = select(10, GetItemInfo(link))
+                items[#items+1] = {
+                    name    = name,
+                    link    = link,
+                    texture = texture,
+                    count   = count,
+                    tab     = tab,
+                    tabName = tabName,
+                }
             end
         end
     end
@@ -424,36 +421,99 @@ local function BuildChunks(items)
     return chunks
 end
 
+local function GBSyncState()
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or nil
+    if not gs then return { revision = 0, hash = "0", lastSyncAt = 0, lastSyncFrom = "" } end
+    gs.syncState = gs.syncState or {}
+    gs.syncState.guildBankSnapshot = gs.syncState.guildBankSnapshot or { revision = 0, hash = "0", lastSyncAt = 0, lastSyncFrom = "", lastAckByPeer = {} }
+    return gs.syncState.guildBankSnapshot
+end
+
+local function GBHashFromItems(items)
+    local parts = {}
+    for _, item in ipairs(items or {}) do
+        local iid = item.itemID or (item.link and tonumber((item.link or ""):match("item:(%d+)"))) or 0
+        local nm = tostring(item.name or item.itemName or "?"):gsub("|", ""):gsub(",", "")
+        parts[#parts + 1] = table.concat({
+            tostring(tonumber(item.tab) or 0),
+            tostring(tonumber(iid) or 0),
+            nm,
+            tostring(tonumber(item.count) or 0)
+        }, "|")
+    end
+    table.sort(parts)
+    local raw = table.concat(parts, ";")
+    return (MTR.Hash and MTR.Hash(raw)) or tostring(#raw)
+end
+
 -- Store a received (or locally-scanned) item list as the guild bank snapshot
 local function MergeGuildBankSnapshot(items, scannedBy, timestamp)
-    MekTownRecruitDB.guildBank = {}
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or MekTownRecruitDB
+    gs.guildBank = {}
+    MekTownRecruitDB.guildBank = gs.guildBank
     local ts = timestamp or date("%Y-%m-%d %H:%M")
     for _, item in ipairs(items) do
         item.updated  = ts
         item.scannedBy = scannedBy or "?"
-        MekTownRecruitDB.guildBank[#MekTownRecruitDB.guildBank+1] = item
+        gs.guildBank[#gs.guildBank+1] = item
     end
-    MTR.dprint("GuildBank snapshot stored:", #MekTownRecruitDB.guildBank,
+    MTR.dprint("GuildBank snapshot stored:", #gs.guildBank,
         "items from", scannedBy, "at", ts)
     -- Notify any open vault window to refresh
     if MTR.vaultWin and MTR.vaultWin:IsShown() then
-        local tf = MTR.vaultWin._showTab  -- noop refresh: just re-fire the tab
         -- Signal to the Guild Bank tab that data changed
         MTR.GuildBankScan.dirty = true
     end
+    local st = GBSyncState()
+    st.lastSyncAt = time()
+    st.lastSyncFrom = scannedBy or st.lastSyncFrom or "?"
+end
+
+function MTR.GetGuildBankSnapshot()
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or MekTownRecruitDB
+    gs.guildBank = gs.guildBank or {}
+    MekTownRecruitDB.guildBank = MekTownRecruitDB.guildBank or {}
+    if #gs.guildBank == 0 and #MekTownRecruitDB.guildBank > 0 then
+        gs.guildBank = MekTownRecruitDB.guildBank
+    elseif #MekTownRecruitDB.guildBank == 0 and #gs.guildBank > 0 then
+        MekTownRecruitDB.guildBank = gs.guildBank
+    end
+    return gs.guildBank
 end
 
 -- Broadcast locally-scanned data to all guild members
 local function BroadcastGuildBank(items, scannedBy)
     if not IsInGuild() then return end
     local chunks = BuildChunks(items)
+    local hash = GBHashFromItems(items)
+    local st = GBSyncState()
+    local now = time()
+    if tostring(st.lastBroadcastHash or "") == tostring(hash) and (now - tonumber(st.lastBroadcastAt or 0)) < 8 then
+        return false
+    end
+    st.revision = tonumber(st.revision or 0) + 1
+    st.hash = hash
+    st.lastSyncAt = time()
+    st.lastSyncFrom = scannedBy or "?"
+    st.lastBroadcastAt = now
+    st.lastBroadcastHash = hash
     local ts     = date("%Y-%m-%d %H:%M")
-    if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, "GB:S:" .. (scannedBy or "")) else SendAddonMessage(GB_PREFIX, "GB:S:" .. (scannedBy or ""), "GUILD") end
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, "GB:S:" .. (scannedBy or "") .. ":" .. tostring(st.revision or 0) .. ":" .. tostring(hash) .. ":" .. tostring(#items or 0)) else SendAddonMessage(GB_PREFIX, "GB:S:" .. (scannedBy or "") .. ":" .. tostring(st.revision or 0) .. ":" .. tostring(hash) .. ":" .. tostring(#items or 0), "GUILD") end
     for _, chunk in ipairs(chunks) do
         if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, "GB:D:" .. chunk) else SendAddonMessage(GB_PREFIX, "GB:D:" .. chunk, "GUILD") end
     end
     if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, "GB:E:" .. ts) else SendAddonMessage(GB_PREFIX, "GB:E:" .. ts, "GUILD") end
     MTR.dprint("GuildBank broadcast:", #items, "items,", #chunks, "chunks")
+    return true
+end
+
+local function BroadcastStoredGuildBank(reason)
+    if not IsInGuild() then return false end
+    local items = MekTownRecruitDB.guildBank or {}
+    local by = (items[1] and items[1].scannedBy) or (MTR.playerName or "?")
+    BroadcastGuildBank(items, by)
+    MTR.dprint("GuildBank snapshot rebroadcast:", reason or "manual", #items, "items")
+    return true
 end
 
 -- ── Public scan trigger — callable by UI button ──────────────────────────────
@@ -463,30 +523,51 @@ end
 local function DoGuildBankScan(opts)
     opts = opts or {}
     local includeLedger = opts.includeLedger == true
+    local retry = tonumber(opts._retry or 0) or 0
     if not MTR.initialized then return end
     MTR.TickRemove("gb_scan_delay")
     MTR.TickAdd("gb_scan_delay", 1, function()
         MTR.TickRemove("gb_scan_delay")
+
+        if not (GuildBankFrame and GuildBankFrame:IsShown()) then
+            return
+        end
+
+        local numTabsReady = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
+        if numTabsReady <= 0 and retry < 3 then
+            local nextOpts = {
+                includeLedger = includeLedger,
+                interactiveSweep = opts.interactiveSweep == true,
+                endAtTab1 = opts.endAtTab1 == true,
+                _retry = retry + 1,
+            }
+            DoGuildBankScan(nextOpts)
+            return
+        end
 
         local items     = ScanGuildBank()
         local scannedBy = MTR.playerName or "?"
         local ts        = date("%Y-%m-%d %H:%M")
 
         MergeGuildBankSnapshot(items, scannedBy, ts)
-        BroadcastGuildBank(items, scannedBy)
+        local sent = BroadcastGuildBank(items, scannedBy)
         if includeLedger and MTR.GuildBankLedger and MTR.GuildBankLedger.BeginLocalScan then
-            MTR.GuildBankLedger.BeginLocalScan(scannedBy)
+            MTR.GuildBankLedger.BeginLocalScan(scannedBy, { forceBroadcast = true, interactiveSweep = (opts.interactiveSweep == true) })
         end
 
         local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
-        MTR.MP(string.format(
-            "|cffd4af37[Vault]|r Guild bank snapshot: |cffffff00%d items|r across |cffffff00%d tab%s|r  "..
-            "|cffaaaaaa(synced to all online guild members)|r",
-            #items, numTabs, numTabs == 1 and "" or "s"))
+        if sent then
+            MTR.MP(string.format(
+                "|cffd4af37[Vault]|r Guild bank snapshot: |cffffff00%d items|r across |cffffff00%d tab%s|r  "..
+                "|cffaaaaaa(synced to all online guild members)|r",
+                #items, numTabs, numTabs == 1 and "" or "s"))
+        else
+            MTR.dprint("GuildBank scan unchanged; skipped duplicate broadcast")
+        end
     end)
 end
 MTR.GuildBankScan.DoScan = function()
-    DoGuildBankScan({ includeLedger = true })
+    DoGuildBankScan({ includeLedger = true, interactiveSweep = true })
 end   -- expose to UI
 
 -- ── Event listeners ────────────────────────────────────────────────────────
@@ -496,32 +577,72 @@ end   -- expose to UI
 local gbScanFrame = CreateFrame("Frame")
 gbScanFrame:RegisterEvent("GUILDBANKFRAME_OPENED")
 gbScanFrame:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED")
+local gbOpenedAt = 0
 gbScanFrame:SetScript("OnEvent", function(self, event)
     if not MTR.initialized then return end
-    -- Both events lead to the same debounced scan.
-    -- DoGuildBankScan already debounces so rapid slot events collapse into one.
+    if event == "GUILDBANKFRAME_OPENED" then
+        gbOpenedAt = time()
+        DoGuildBankScan({ includeLedger = true, interactiveSweep = true, endAtTab1 = true })
+        MTR.TickAdd("gb_open_rescan_1", 1.5, function()
+            MTR.TickRemove("gb_open_rescan_1")
+            if GuildBankFrame and GuildBankFrame:IsShown() then
+                DoGuildBankScan({ includeLedger = true, interactiveSweep = true, endAtTab1 = true })
+            end
+        end)
+        MTR.TickAdd("gb_open_rescan_2", 3.0, function()
+            MTR.TickRemove("gb_open_rescan_2")
+            if GuildBankFrame and GuildBankFrame:IsShown() then
+                DoGuildBankScan({ includeLedger = true, interactiveSweep = true, endAtTab1 = true })
+            end
+        end)
+        return
+    end
+
+    -- Avoid replacing the open-event interactive sweep with a plain bag scan.
+    if (time() - (gbOpenedAt or 0)) < 4 then return end
     DoGuildBankScan({ includeLedger = false })
 end)
 
 -- Receive guild bank snapshot from another player
 local gbRecvBuf    = nil
 local gbRecvSender = nil
+local gbRecvRev    = nil
+local gbRecvHash   = nil
 local gbRecvFrame  = CreateFrame("Frame")
 gbRecvFrame:RegisterEvent("CHAT_MSG_ADDON")
 gbRecvFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= GB_PREFIX then return end
     if not MTR.initialized then return end
 
-    -- Strip realm from sender
-    local senderName = (sender or ""):match("^([^%-]+)") or sender or ""
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, false)) or message, ((sender or ""):match("^([^%-]+)") or sender or "")
+    if not unpacked then return end
 
-    if message:sub(1, 5) == "GB:S:" then
+    if unpacked:sub(1, 5) == "GB:S:" then
         gbRecvBuf    = {}
-        gbRecvSender = message:sub(6)
+        local by, rev, hash = unpacked:match("^GB:S:([^:]*):([^:]*):([^:]*):")
+        gbRecvSender = by or unpacked:sub(6)
+        gbRecvRev = tonumber(rev) or nil
+        gbRecvHash = (hash and hash ~= "") and hash or nil
         if gbRecvSender == "" then gbRecvSender = senderName end
 
-    elseif message:sub(1, 5) == "GB:D:" and gbRecvBuf then
-        for token in message:sub(6):gmatch("[^,]+") do
+    elseif unpacked:sub(1, 7) == "GB:REQ:" then
+        local _, peerHash = unpacked:match("^GB:REQ:([^:]*):?(.*)$")
+        local st = GBSyncState()
+        if tostring(peerHash or "") ~= tostring(st.hash or "0") then
+            BroadcastStoredGuildBank("peer-request")
+        end
+
+    elseif unpacked:sub(1, 7) == "GB:ACK:" then
+        local peer, hash, rev = unpacked:match("^GB:ACK:([^:]+):([^:]+):([^:]+)$")
+        local st = GBSyncState()
+        if tostring(hash or "") == tostring(st.hash or "0") then
+            st.lastAckByPeer = st.lastAckByPeer or {}
+            st.lastAckByPeer[peer or senderName or "?"] = { revision = tonumber(rev) or 0, at = time() }
+        end
+
+    elseif unpacked:sub(1, 5) == "GB:D:" and gbRecvBuf then
+        local d = unpacked:sub(6)
+        for token in d:gmatch("[^,]+") do
             -- New format (v1.1.1+): "tab|itemID|name|count"
             -- Old format (pre v1.1.1): "tab|name|count"
             -- Try new format first; fall back to old so cross-version syncs still work.
@@ -547,15 +668,47 @@ gbRecvFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
             end
         end
 
-    elseif message:sub(1, 5) == "GB:E:" and gbRecvBuf then
-        local ts = message:sub(6)
+    elseif unpacked:sub(1, 5) == "GB:E:" and gbRecvBuf then
+        local ts = unpacked:sub(6)
         -- Don't overwrite with our own broadcast echo
         if senderName ~= MTR.playerName then
-            MergeGuildBankSnapshot(gbRecvBuf, gbRecvSender, ts)
-            MTR.dprint("GuildBank received from", gbRecvSender, "—", #gbRecvBuf, "items")
+            local st = GBSyncState()
+            local ok = true
+            st.lastRevByPeer = st.lastRevByPeer or {}
+            local hashMismatch = false
+            if gbRecvHash then
+                local h = GBHashFromItems(gbRecvBuf)
+                if h ~= gbRecvHash then hashMismatch = true end
+            end
+            local peerKey = tostring(senderName or gbRecvSender or "?")
+            local peerPrevRev = tonumber(st.lastRevByPeer[peerKey] or 0)
+            if ok and hashMismatch then
+                st.lastConflictAt = time()
+                st.lastConflictFrom = peerKey
+                st.lastConflictReason = "hash-mismatch-accepted"
+                MTR.dprint("GuildBank hash mismatch accepted from", peerKey, "(using officer payload)")
+            end
+            if ok then
+                MergeGuildBankSnapshot(gbRecvBuf, gbRecvSender, ts)
+                if gbRecvRev then st.revision = math.max(tonumber(st.revision or 0), tonumber(gbRecvRev or 0)) end
+                st.hash = GBHashFromItems(gbRecvBuf)
+                if gbRecvRev then st.lastRevByPeer[peerKey] = tonumber(gbRecvRev) or peerPrevRev end
+                st.lastSyncAt = time()
+                st.lastSyncFrom = gbRecvSender or senderName or "?"
+                st.lastConflictReason = nil
+                if MTR.SendGuildScoped then MTR.SendGuildScoped(GB_PREFIX, string.format("GB:ACK:%s:%s:%d", tostring(MTR.playerName or "?"), tostring(st.hash or "0"), tonumber(st.revision or 0))) else SendAddonMessage(GB_PREFIX, string.format("GB:ACK:%s:%s:%d", tostring(MTR.playerName or "?"), tostring(st.hash or "0"), tonumber(st.revision or 0)), "GUILD") end
+                MTR.dprint("GuildBank received from", gbRecvSender, "—", #gbRecvBuf, "items")
+            else
+                st.lastConflictAt = time()
+                st.lastConflictFrom = tostring(gbRecvSender or senderName or "?")
+                if not st.lastConflictReason then st.lastConflictReason = "hash-mismatch" end
+                MTR.MPE("[GuildBank Sync] Rejected snapshot from " .. tostring(gbRecvSender or senderName or "?") .. " (stale or hash mismatch).")
+            end
         end
         gbRecvBuf    = nil
         gbRecvSender = nil
+        gbRecvRev    = nil
+        gbRecvHash   = nil
     end
 end)
 
@@ -573,6 +726,8 @@ GBL.RETAIN_DAYS = 30
 GBL.MAX_ENTRIES = 5000
 
 local gblRecvBuf = nil
+local gblRecvRev = nil
+local gblRecvHash = nil
 
 local function GBL_DB()
     local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or MekTownRecruitDB
@@ -583,8 +738,16 @@ local function GBL_DB()
     return gs.guildBankLedger
 end
 
+local function GBL_SyncState()
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or nil
+    if not gs then return { revision = 0, hash = "0", lastSyncAt = 0, lastSyncFrom = "", lastAckByPeer = {} } end
+    gs.syncState = gs.syncState or {}
+    gs.syncState.guildBankLedger = gs.syncState.guildBankLedger or { revision = 0, hash = "0", lastSyncAt = 0, lastSyncFrom = "", lastAckByPeer = {} }
+    return gs.syncState.guildBankLedger
+end
+
 local function GBL_DebugEnabled()
-    return MTR.IsDebugEnabled and MTR.IsDebugEnabled() or false
+    return MTR.IsDebugEnabled and MTR.IsDebugEnabled("ledger") or false
 end
 
 local function GBL_Debug(msg)
@@ -597,14 +760,17 @@ local function GBL_Debug(msg)
         table.remove(db.meta.debugLog, 1)
     end
     db.meta.lastDebugAt = date("%Y-%m-%d %H:%M:%S")
-    if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+    if (MTR.IsDebugChatEnabled and MTR.IsDebugChatEnabled()) and DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
         DEFAULT_CHAT_FRAME:AddMessage("|cff88ccff[MTR Ledger]|r " .. line)
     end
 end
 
 function GBL.DebugEnable(flag)
-    if MTR.SetDebugEnabled then
-        MTR.SetDebugEnabled(flag)
+    if flag then
+        if MTR.SetDebugEnabled then MTR.SetDebugEnabled(true) end
+        if MTR.SetDebugModuleEnabled then MTR.SetDebugModuleEnabled("ledger", true) end
+    else
+        if MTR.SetDebugModuleEnabled then MTR.SetDebugModuleEnabled("ledger", false) end
     end
     if GBL_DebugEnabled() then
         GBL_Debug("Debug enabled")
@@ -669,7 +835,119 @@ local function GBL_BuildEpoch(y, m, d, h)
     return time()
 end
 
-local function GBL_Fingerprint(e)
+local function GBL_AgePartsToSeconds(y, m, d, h)
+    local yy = tonumber(y) or 0
+    local mm = tonumber(m) or 0
+    local dd = tonumber(d) or 0
+    local hh = tonumber(h) or 0
+    return (yy * 365 * 86400) + (mm * 30 * 86400) + (dd * 86400) + (hh * 3600)
+end
+
+local function GBL_AgePartsToText(y, m, d, h)
+    local yy = tonumber(y) or 0
+    local mm = tonumber(m) or 0
+    local dd = tonumber(d) or 0
+    local hh = tonumber(h) or 0
+    if yy <= 0 and mm <= 0 and dd <= 0 and hh <= 0 then return "just now" end
+    if yy > 0 then return tostring(yy) .. "y ago" end
+    if mm > 0 then return tostring(mm) .. "mo ago" end
+    if dd > 0 then return tostring(dd) .. "d ago" end
+    return tostring(hh) .. "h ago"
+end
+
+local function GBL_ParseRelativeAgeSeconds(ageText)
+    if type(ageText) ~= "string" then return nil, nil end
+    local s = string.lower(ageText)
+    if s == "" then return nil, nil end
+
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", "")
+    s = s:gsub("|r", "")
+    s = s:gsub("|4([^:;]+):([^;]+);", "%1")
+    s = s:gsub("[%(%)]", " ")
+    s = s:gsub("%s+", " ")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+
+    if s:find("just now", 1, true) then return 0, "minute" end
+    if s:find("today", 1, true) then return 0, "day" end
+    if s:find("yesterday", 1, true) then return 86400, "day" end
+    if s:find("< an hour", 1, true) then return 1800, "hour" end
+    if s:find("an hour ago", 1, true) then return 3600, "hour" end
+
+    local n = tonumber(s:match("(%d+)%s*min"))
+    if n then return n * 60, "minute" end
+
+    n = tonumber(s:match("(%d+)%s*hour"))
+    if n then return n * 3600, "hour" end
+
+    n = tonumber(s:match("(%d+)%s*day"))
+    if n then return n * 86400, "day" end
+
+    n = tonumber(s:match("(%d+)%s*week"))
+    if n then return n * 7 * 86400, "week" end
+
+    n = tonumber(s:match("(%d+)%s*month"))
+    if n then return n * 30 * 86400, "month" end
+
+    n = tonumber(s:match("(%d+)%s*year"))
+    if n then return n * 365 * 86400, "year" end
+
+    n = tonumber(s:match("(%d+)%s*y"))
+    if n then return n * 365 * 86400, "year" end
+
+    n = tonumber(s:match("(%d+)%s*mo"))
+    if n then return n * 30 * 86400, "month" end
+
+    n = tonumber(s:match("(%d+)%s*w"))
+    if n then return n * 7 * 86400, "week" end
+
+    n = tonumber(s:match("(%d+)%s*d"))
+    if n then return n * 86400, "day" end
+
+    n = tonumber(s:match("(%d+)%s*h"))
+    if n then return n * 3600, "hour" end
+
+    return nil, nil
+end
+
+local function GBL_DeriveEpochFromAgeParts(y, m, d, h, baseEpoch)
+    local yy = tonumber(y) or 0
+    local mm = tonumber(m) or 0
+    local dd = tonumber(d) or 0
+    local hh = tonumber(h) or 0
+    local base = tonumber(baseEpoch) or time()
+    local ageSec = GBL_AgePartsToSeconds(yy, mm, dd, hh)
+    if ageSec <= 0 then return 0 end
+
+    if yy > 0 or mm > 0 or dd > 0 then
+        local dayBase = math.floor(base / 86400) * 86400
+        return math.max(0, dayBase - ageSec)
+    end
+
+    local hourBase = math.floor(base / 3600) * 3600
+    return math.max(0, hourBase - ageSec)
+end
+
+local function GBL_DeriveEpochFromRelative(ageText, baseEpoch)
+    local base = tonumber(baseEpoch) or time()
+    local sec, unit = GBL_ParseRelativeAgeSeconds(ageText)
+    if sec == nil then return 0, nil end
+
+    if unit == "day" or unit == "week" or unit == "month" or unit == "year" then
+        local dayBase = math.floor(base / 86400) * 86400
+        return math.max(0, dayBase - sec), unit
+    end
+    if unit == "hour" then
+        local hourBase = math.floor(base / 3600) * 3600
+        return math.max(0, hourBase - sec), unit
+    end
+    if unit == "minute" then
+        local minBase = math.floor(base / 60) * 60
+        return math.max(0, minBase - sec), unit
+    end
+    return math.max(0, base - sec), unit
+end
+
+local function GBL_Signature(e)
     return table.concat({
         tostring(e.kind or "item"),
         tostring(e.txType or "?"),
@@ -678,17 +956,118 @@ local function GBL_Fingerprint(e)
         tostring(e.itemName or "?"),
         tostring(e.count or 0),
         tostring(e.tab1 or 0),
-        tostring(e.tab2 or 0),
-        tostring(e.year or 0),
-        tostring(e.month or 0),
-        tostring(e.day or 0),
-        tostring(e.hour or 0)
+        tostring(e.tab2 or 0)
     }, "#")
+end
+
+local function GBL_Fingerprint(e)
+    local txid = tostring(e.txid or "")
+    if txid ~= "" then
+        return "txid#" .. txid
+    end
+    local rough = tostring(e.relativeText or "")
+    local epochHour = math.floor((tonumber(e.epoch) or 0) / 3600)
+    return table.concat({
+        GBL_Signature(e),
+        tostring(epochHour),
+        rough
+    }, "#")
+end
+
+local function GBL_EnsureTxId(e)
+    if not e then return "" end
+    if e.txid and e.txid ~= "" then return e.txid end
+    local epochBase = tonumber(e.epoch) or 0
+    if epochBase <= 0 then epochBase = tonumber(e.scanEpoch) or 0 end
+    local epochHour = math.floor(epochBase / 3600)
+    local seed = table.concat({
+        GBL_Signature(e),
+        tostring(epochHour),
+        tostring(e.relativeText or "")
+    }, "|")
+    e.txid = (MTR.Hash and MTR.Hash(seed)) or seed
+    return e.txid
+end
+
+local function GBL_EffectiveEpoch(e)
+    if not e then return 0 end
+    local exact = (e.hasExactDate == true or e.hasExactDate == 1 or e.hasExactDate == "1")
+    if exact then
+        local ts = tonumber(e.epoch) or 0
+        if ts > 0 then return ts end
+    end
+    local conf = tostring(e.timeConfidence or "")
+    local ep = tonumber(e.epoch) or 0
+    local fs = tonumber(e.firstSeenEpoch) or 0
+    if conf ~= "first_seen" and ep > 0 then return ep end
+    if fs > 0 then return fs end
+    if ep > 0 then return ep end
+    return tonumber(e.scanEpoch) or 0
+end
+
+local function GBL_EnsureCanonicalTime(e)
+    if not e then return end
+    local exact = (e.hasExactDate == true or e.hasExactDate == 1 or e.hasExactDate == "1")
+    local now = time()
+    local scanEpoch = tonumber(e.scanEpoch) or now
+
+    if exact then
+        e.timeConfidence = "exact_game"
+        if (tonumber(e.firstSeenEpoch) or 0) <= 0 then
+            e.firstSeenEpoch = tonumber(e.epoch) or scanEpoch
+        end
+    else
+        if e.timeConfidence ~= "derived_game" and e.timeConfidence ~= "first_seen" then
+            if (tonumber(e.epoch) or 0) > 0 then
+                e.timeConfidence = "derived_game"
+            else
+                e.timeConfidence = "first_seen"
+            end
+        end
+        if (tonumber(e.firstSeenEpoch) or 0) <= 0 then
+            if (tonumber(e.epoch) or 0) > 0 then
+                e.firstSeenEpoch = tonumber(e.epoch) or scanEpoch
+            else
+                e.firstSeenEpoch = scanEpoch
+            end
+        elseif e.timeConfidence ~= "first_seen" and (tonumber(e.epoch) or 0) > 0 and math.abs((tonumber(e.firstSeenEpoch) or 0) - (tonumber(e.epoch) or 0)) > (12 * 3600) then
+            e.firstSeenEpoch = tonumber(e.epoch) or e.firstSeenEpoch
+        end
+    end
+
+    if (e.firstSeenBy or "") == "" then
+        e.firstSeenBy = e.scanBy or MTR.playerName or "?"
+    end
 end
 
 local function GBL_DateText(e)
     local y = GBL_NormalizeYear(e.year)
-    return string.format("%04d-%02d-%02d %02d:00", y, tonumber(e.month) or 1, tonumber(e.day) or 1, tonumber(e.hour) or 0)
+    return string.format("%02d/%02d/%04d %02d:00", tonumber(e.day) or 1, tonumber(e.month) or 1, y, tonumber(e.hour) or 0)
+end
+
+local function GBL_EntryQualityScore(e)
+    if type(e) ~= "table" then return 0 end
+    local score = 0
+    local hasExact = (e.hasExactDate == true or e.hasExactDate == 1 or e.hasExactDate == "1")
+    if hasExact then score = score + 1000 end
+    if (tonumber(e.firstSeenEpoch) or 0) > 0 then score = score + 200 end
+    if (tonumber(e.epoch) or 0) > 0 then score = score + 100 end
+    if (e.relativeText or "") ~= "" then score = score + 50 end
+    if (e.scanBy or "") ~= "" then score = score + 10 end
+    return score
+end
+
+local function GBL_PickBetterEntry(a, b)
+    if not a then return b end
+    if not b then return a end
+    local sa = GBL_EntryQualityScore(a)
+    local sb = GBL_EntryQualityScore(b)
+    if sb > sa then return b end
+    if sa > sb then return a end
+    local ta = GBL_EffectiveEpoch(a)
+    local tb = GBL_EffectiveEpoch(b)
+    if tb > ta then return b end
+    return a
 end
 
 local function GBL_Purge()
@@ -697,19 +1076,92 @@ local function GBL_Purge()
     local cutoff = now - (GBL.RETAIN_DAYS * 86400)
     local keep = {}
     for _, e in ipairs(db.entries) do
-        local ts = tonumber(e.epoch) or now
-        if ts >= cutoff then
+        local ts = tonumber(e.epoch) or 0
+        if e.hasExactDate then
+            e.dateText = GBL_DateText(e)
+        else
+            if ((tonumber(e.year) or 0) > 0 or (tonumber(e.month) or 0) > 0 or (tonumber(e.day) or 0) > 0 or (tonumber(e.hour) or 0) > 0) then
+                local scanEpoch = tonumber(e.scanEpoch) or time()
+                local agePartEpoch = GBL_DeriveEpochFromAgeParts(e.year, e.month, e.day, e.hour, scanEpoch)
+                if agePartEpoch > 0 and (ts <= 0 or tostring(e.timeConfidence or "") == "first_seen") then
+                    ts = agePartEpoch
+                    e.epoch = agePartEpoch
+                    e.timeConfidence = "derived_game"
+                end
+                if agePartEpoch > 0 and ts > 0 and math.abs(ts - agePartEpoch) > (18 * 3600) then
+                    ts = agePartEpoch
+                    e.epoch = agePartEpoch
+                    e.timeConfidence = "derived_game"
+                end
+            elseif ts <= 0 then
+                local scanEpoch = tonumber(e.scanEpoch) or time()
+                ts = scanEpoch
+                e.epoch = ts
+            end
+            local relEpoch, relUnit = GBL_DeriveEpochFromRelative(e.relativeText, tonumber(e.scanEpoch) or time())
+            if relEpoch > 0 then
+                local scanEpoch = tonumber(e.scanEpoch) or time()
+                local conf = tostring(e.timeConfidence or "")
+                local likelyPoisonedRecent = (relUnit == "day" or relUnit == "week" or relUnit == "month" or relUnit == "year") and ts > 0 and ts >= (scanEpoch - (6 * 3600))
+                if ts <= 0 or conf == "first_seen" or likelyPoisonedRecent then
+                    ts = relEpoch
+                    e.epoch = relEpoch
+                    e.timeConfidence = "derived_game"
+                end
+            end
+            if (e.relativeText or "") == "" and ((tonumber(e.year) or 0) > 0 or (tonumber(e.month) or 0) > 0 or (tonumber(e.day) or 0) > 0 or (tonumber(e.hour) or 0) > 0) then
+                e.relativeText = GBL_AgePartsToText(e.year, e.month, e.day, e.hour)
+            end
+            GBL_EnsureCanonicalTime(e)
+            ts = GBL_EffectiveEpoch(e)
+            if ts > 0 then
+                e.dateText = date("%d/%m/%Y %H:%M", ts)
+            else
+                e.dateText = e.relativeText and e.relativeText ~= "" and e.relativeText or "Unknown (game log timestamp unavailable)"
+            end
+        end
+        if e.hasExactDate then
+            GBL_EnsureCanonicalTime(e)
+            ts = GBL_EffectiveEpoch(e)
+        end
+        if ts <= 0 or ts >= cutoff then
             keep[#keep + 1] = e
         end
     end
+
+    local unique = {}
+    local duplicatesRemoved = 0
+    for _, e in ipairs(keep) do
+        GBL_EnsureTxId(e)
+        local key = (e.txid and e.txid ~= "") and ("txid#" .. tostring(e.txid)) or ("fp#" .. tostring(GBL_Fingerprint(e)))
+        local prev = unique[key]
+        if prev then
+            local chosen = GBL_PickBetterEntry(prev, e)
+            unique[key] = chosen
+            if chosen ~= e then
+                duplicatesRemoved = duplicatesRemoved + 1
+            else
+                duplicatesRemoved = duplicatesRemoved + 1
+            end
+        else
+            unique[key] = e
+        end
+    end
+
+    keep = {}
+    for _, e in pairs(unique) do
+        keep[#keep + 1] = e
+    end
+
     table.sort(keep, function(a, b)
-        return (tonumber(a.epoch) or 0) > (tonumber(b.epoch) or 0)
+        return GBL_EffectiveEpoch(a) > GBL_EffectiveEpoch(b)
     end)
     while #keep > GBL.MAX_ENTRIES do
         table.remove(keep)
     end
     db.entries = keep
     db.meta.count = #keep
+    db.meta.lastDuplicatesRemoved = duplicatesRemoved
     db.meta.lastPurgeAt = date("%Y-%m-%d %H:%M")
 end
 
@@ -724,29 +1176,120 @@ local function GBL_MergeEntries(entries, source, scanTS)
     local db = GBL_DB()
     local existing = {}
     for _, e in ipairs(db.entries) do
-        existing[e.fingerprint] = true
+        GBL_EnsureTxId(e)
+        e.fingerprint = GBL_Fingerprint(e)
+        existing[e.fingerprint] = e
     end
     local added = 0
+    local updated = 0
     for _, e in ipairs(entries or {}) do
-        if e and e.fingerprint and not existing[e.fingerprint] then
-            existing[e.fingerprint] = true
-            e.syncedFrom = source or e.syncedFrom or "?"
+        if e then
             e.scanTS = e.scanTS or scanTS or date("%Y-%m-%d %H:%M")
-            db.entries[#db.entries + 1] = e
-            added = added + 1
+            e.scanEpoch = tonumber(e.scanEpoch) or time()
+            GBL_EnsureCanonicalTime(e)
+            GBL_EnsureTxId(e)
+            e.fingerprint = GBL_Fingerprint(e)
+
+            local dup = existing[e.fingerprint]
+            if not dup then
+                local sig = GBL_Signature(e)
+                local eEpoch = tonumber(e.epoch) or 0
+                for _, old in ipairs(db.entries) do
+                    if GBL_Signature(old) == sig then
+                        local oEpoch = tonumber(old.epoch) or 0
+                        -- Prefer enriching older unknown-time rows with newer rough/exact time.
+                        if oEpoch <= 0 and eEpoch > 0 then
+                            dup = old
+                            break
+                        end
+                        if oEpoch > 0 and eEpoch <= 0 then
+                            dup = old
+                            break
+                        end
+                        if eEpoch > 0 and oEpoch > 0 and math.abs(eEpoch - oEpoch) <= (18 * 3600) then
+                            dup = old
+                            break
+                        end
+                    end
+                end
+            end
+
+            if dup then
+                local changed = false
+                local dupEpoch = tonumber(dup.epoch) or 0
+                local eEpoch = tonumber(e.epoch) or 0
+                local dupDateText = string.lower(tostring(dup.dateText or ""))
+                local eDateText = string.lower(tostring(e.dateText or ""))
+
+                if dupEpoch <= 0 and eEpoch > 0 then
+                    dup.epoch = e.epoch
+                    changed = true
+                end
+                if not dup.hasExactDate and e.hasExactDate then
+                    dup.hasExactDate = true
+                    dup.year, dup.month, dup.day, dup.hour = e.year, e.month, e.day, e.hour
+                    changed = true
+                end
+                if (dup.relativeText or "") == "" and (e.relativeText or "") ~= "" then
+                    dup.relativeText = e.relativeText
+                    changed = true
+                end
+                if ((dup.dateText or "") == "" or dupDateText:find("unknown", 1, true)) and (e.dateText or "") ~= "" and not eDateText:find("unknown", 1, true) then
+                    dup.dateText = e.dateText
+                    changed = true
+                end
+                if (tonumber(dup.scanEpoch) or 0) <= 0 and (tonumber(e.scanEpoch) or 0) > 0 then
+                    dup.scanEpoch = e.scanEpoch
+                    changed = true
+                end
+                if (dup.scanTS or "") == "" and (e.scanTS or "") ~= "" then
+                    dup.scanTS = e.scanTS
+                    changed = true
+                end
+                if (dup.txid or "") == "" and (e.txid or "") ~= "" then
+                    dup.txid = e.txid
+                    changed = true
+                end
+                local dFirst = tonumber(dup.firstSeenEpoch) or 0
+                local eFirst = tonumber(e.firstSeenEpoch) or 0
+                if eFirst > 0 and (dFirst <= 0 or eFirst < dFirst) then
+                    dup.firstSeenEpoch = eFirst
+                    dup.firstSeenBy = e.firstSeenBy or dup.firstSeenBy
+                    changed = true
+                end
+                if (dup.timeConfidence or "") == "" and (e.timeConfidence or "") ~= "" then
+                    dup.timeConfidence = e.timeConfidence
+                    changed = true
+                end
+                if changed then
+                    GBL_EnsureCanonicalTime(dup)
+                    dup.fingerprint = GBL_Fingerprint(dup)
+                    existing[dup.fingerprint] = dup
+                    updated = updated + 1
+                end
+            else
+                existing[e.fingerprint] = e
+                e.syncedFrom = source or e.syncedFrom or "?"
+                GBL_EnsureCanonicalTime(e)
+                db.entries[#db.entries + 1] = e
+                added = added + 1
+            end
         end
     end
-    if added > 0 then
+    if added > 0 or updated > 0 then
         GBL_Purge()
         db.meta.lastSyncFrom = source or db.meta.lastSyncFrom
         db.meta.lastSyncAt = scanTS or date("%Y-%m-%d %H:%M")
         db.meta.lastAdded = added
+        db.meta.lastUpdated = updated
         GBL_MarkDirty()
     end
-    return added
+    return added, updated
 end
 
 local function GBL_EntryToToken(e)
+    GBL_EnsureCanonicalTime(e)
+    GBL_EnsureTxId(e)
     return table.concat({
         GBL_Strip(e.kind or "item"),
         GBL_Strip(e.txType or "?"),
@@ -760,14 +1303,24 @@ local function GBL_EntryToToken(e)
         tostring(e.month or 0),
         tostring(e.day or 0),
         tostring(e.hour or 0),
+        tostring(tonumber(e.epoch) or 0),
         GBL_Strip(e.scanBy or "?"),
         GBL_Strip(e.scanTS or ""),
-        (e.hasExactDate and "1" or "0")
+        tostring(tonumber(e.scanEpoch) or 0),
+        (e.hasExactDate and "1" or "0"),
+        GBL_Strip(e.relativeText or ""),
+        GBL_Strip(e.txid or ""),
+        tostring(tonumber(e.firstSeenEpoch) or 0),
+        GBL_Strip(e.firstSeenBy or ""),
+        GBL_Strip(e.timeConfidence or "")
     }, "|")
 end
 
 local function GBL_TokenToEntry(token)
-    local kind, txType, actor, itemID, itemName, count, tab1, tab2, y, m, d, h, scanBy, scanTS, hasExactDate = token:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+    local kind, txType, actor, itemID, itemName, count, tab1, tab2, y, m, d, h, epoch, scanBy, scanTS, scanEpoch, hasExactDate, relativeText, txid, firstSeenEpoch, firstSeenBy, timeConfidence = token:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+    if not kind then
+        kind, txType, actor, itemID, itemName, count, tab1, tab2, y, m, d, h, epoch, scanBy, scanTS, scanEpoch, hasExactDate, relativeText, txid = token:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+    end
     if not kind then
         kind, txType, actor, itemID, itemName, count, tab1, tab2, y, m, d, h, scanBy, scanTS = token:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
         if not kind then return nil end
@@ -785,16 +1338,35 @@ local function GBL_TokenToEntry(token)
         month = tonumber(m) or 0,
         day = tonumber(d) or 0,
         hour = tonumber(h) or 0,
+        epoch = tonumber(epoch) or 0,
         scanBy = scanBy ~= "" and scanBy or "?",
         scanTS = scanTS ~= "" and scanTS or date("%Y-%m-%d %H:%M"),
+        scanEpoch = tonumber(scanEpoch) or 0,
         hasExactDate = tostring(hasExactDate or "0") == "1",
+        relativeText = relativeText ~= "" and relativeText or nil,
+        txid = txid ~= "" and txid or nil,
+        firstSeenEpoch = tonumber(firstSeenEpoch) or 0,
+        firstSeenBy = firstSeenBy ~= "" and firstSeenBy or nil,
+        timeConfidence = timeConfidence ~= "" and timeConfidence or nil,
     }
     if e.itemID and e.itemID > 0 then
         e.itemLink = GetItemInfo(e.itemID)
         e.itemLink = select(2, GetItemInfo(e.itemID)) or ("|cffffffff|Hitem:" .. e.itemID .. ":0:0:0:0:0:0:0|h[" .. e.itemName .. "]|h|r")
     end
-    e.epoch = e.hasExactDate and GBL_BuildEpoch(e.year, e.month, e.day, e.hour) or GBL_BuildEpoch(e.year, e.month, e.day, e.hour)
-    e.dateText = e.hasExactDate and GBL_DateText(e) or (e.scanTS ~= "" and e.scanTS or date("%Y-%m-%d %H:%M", e.epoch))
+    if e.epoch <= 0 then
+        e.epoch = e.hasExactDate and GBL_BuildEpoch(e.year, e.month, e.day, e.hour) or 0
+    end
+    if e.hasExactDate then
+        e.dateText = GBL_DateText(e)
+    elseif e.epoch > 0 then
+        local shownEpoch = (tonumber(e.firstSeenEpoch) or 0) > 0 and tonumber(e.firstSeenEpoch) or tonumber(e.epoch)
+        e.dateText = date("%d/%m/%Y %H:%M", shownEpoch)
+    else
+        e.dateText = (e.relativeText and e.relativeText ~= "" and e.relativeText) or "Unknown (game log timestamp unavailable)"
+    end
+    if not e.scanEpoch or e.scanEpoch <= 0 then e.scanEpoch = time() end
+    GBL_EnsureCanonicalTime(e)
+    GBL_EnsureTxId(e)
     e.fingerprint = GBL_Fingerprint(e)
     return e
 end
@@ -814,14 +1386,30 @@ local function GBL_BuildChunks(entries)
     return chunks
 end
 
+local function GBL_HashEntries(entries)
+    local tokens = {}
+    for _, e in ipairs(entries or {}) do
+        tokens[#tokens + 1] = GBL_EntryToToken(e)
+    end
+    table.sort(tokens)
+    local raw = table.concat(tokens, ";")
+    return (MTR.Hash and MTR.Hash(raw)) or tostring(#raw)
+end
+
 local function GBL_Broadcast(entries, sourceTag)
     if not IsInGuild() then return end
     entries = entries or GBL_DB().entries or {}
     GBL_Purge()
     local chunks = GBL_BuildChunks(entries)
+    local hash = GBL_HashEntries(entries)
+    local ss = GBL_SyncState()
+    ss.revision = tonumber(ss.revision or 0) + 1
+    ss.hash = hash
+    ss.lastSyncAt = time()
+    ss.lastSyncFrom = MTR.playerName or "?"
     local who = MTR.playerName or "?"
     local ts = date("%Y-%m-%d %H:%M")
-    if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:S:" .. who .. ":" .. tostring(#entries) .. ":" .. sourceTag .. ":" .. ts) else SendAddonMessage(GBL_PREFIX, "GL:S:" .. who .. ":" .. tostring(#entries) .. ":" .. sourceTag .. ":" .. ts, "GUILD") end
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:S:" .. who .. ":" .. tostring(#entries) .. ":" .. sourceTag .. ":" .. ts .. ":" .. tostring(ss.revision or 0) .. ":" .. tostring(hash)) else SendAddonMessage(GBL_PREFIX, "GL:S:" .. who .. ":" .. tostring(#entries) .. ":" .. sourceTag .. ":" .. ts .. ":" .. tostring(ss.revision or 0) .. ":" .. tostring(hash), "GUILD") end
     for _, chunk in ipairs(chunks) do
         if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:D:" .. chunk) else SendAddonMessage(GBL_PREFIX, "GL:D:" .. chunk, "GUILD") end
     end
@@ -835,33 +1423,16 @@ local gblScanState = {
     idx = 0,
     entries = nil,
     waitingTab = nil,
+    forceBroadcast = false,
+    interactiveSweep = false,
+    endAtTab1 = false,
+    origMode = nil,
+    origTab = nil,
 }
 
-local function GBL_AgeTextToEpoch(ageText)
-    local now = time()
-    if type(ageText) ~= "string" or ageText == "" then return now end
-    local s = string.lower(ageText)
-
-    local n = tonumber(s:match("(%d+)%s+minute")) or tonumber(s:match("(%d+)%s+min"))
-    if n then return now - (n * 60) end
-
-    n = tonumber(s:match("(%d+)%s+hour"))
-    if n then return now - (n * 3600) end
-
-    n = tonumber(s:match("(%d+)%s+day"))
-    if n then return now - (n * 86400) end
-
-    n = tonumber(s:match("(%d+)%s+week"))
-    if n then return now - (n * 7 * 86400) end
-
-    if s:find("yesterday", 1, true) then
-        return now - 86400
-    end
-    if s:find("today", 1, true) then
-        return now
-    end
-
-    return now
+local function GBL_AgeTextToEpoch(ageText, baseEpoch)
+    local derived = GBL_DeriveEpochFromRelative(ageText, baseEpoch)
+    return tonumber(derived) or 0
 end
 
 local function GBL_ParseTextLogMessage(tab, rawMsg, scanBy)
@@ -916,11 +1487,18 @@ local function GBL_ParseTextLogMessage(tab, rawMsg, scanBy)
         hour = 0,
         scanBy = scanBy or MTR.playerName or "?",
         scanTS = date("%Y-%m-%d %H:%M"),
+        scanEpoch = time(),
         source = "textlog",
         relativeText = ageText,
     }
-    e.epoch = GBL_AgeTextToEpoch(ageText)
-    e.dateText = ageText ~= "" and ageText or date("%Y-%m-%d %H:00")
+    e.epoch = GBL_AgeTextToEpoch(ageText, e.scanEpoch)
+    GBL_EnsureCanonicalTime(e)
+    if e.epoch > 0 then
+        e.dateText = date("%d/%m/%Y %H:%M", GBL_EffectiveEpoch(e))
+    else
+        e.dateText = ageText ~= "" and ageText or "Unknown (game log timestamp unavailable)"
+    end
+    GBL_EnsureTxId(e)
     e.fingerprint = table.concat({
         e.txType or "?",
         e.actor or "?",
@@ -1023,12 +1601,13 @@ local function GBL_ReadTabTransactions(tab, entries, scanBy)
             local itemName = itemLink and GetItemInfo(itemLink) or nil
             itemName = itemName or (itemLink and itemLink:match("%[(.-)%]")) or actor or "Unknown"
 
-            local nowDate = date("*t")
             local year = tonumber(y) or 0
             local month = tonumber(m) or 0
             local day = tonumber(d) or 0
             local hour = tonumber(h) or 0
-            local hasValidDate = year > 0 and month > 0 and day > 0
+            local hasExactDate = year > 1900 and month > 0 and day > 0
+            local scanEpoch = time()
+            local derivedEpoch = hasExactDate and GBL_BuildEpoch(year, month, day, hour) or GBL_DeriveEpochFromAgeParts(year, month, day, hour, scanEpoch)
 
             local e = {
                 kind = "item",
@@ -1040,18 +1619,21 @@ local function GBL_ReadTabTransactions(tab, entries, scanBy)
                 count = tonumber(itemCount) or 0,
                 tab1 = tonumber(tab1) or tab,
                 tab2 = tonumber(tab2) or 0,
-                year = hasValidDate and year or nowDate.year,
-                month = hasValidDate and month or nowDate.month,
-                day = hasValidDate and day or nowDate.day,
-                hour = hasValidDate and hour or nowDate.hour,
+                year = year,
+                month = month,
+                day = day,
+                hour = hour,
                 scanBy = scanBy or MTR.playerName or "?",
                 scanTS = date("%Y-%m-%d %H:%M"),
+                scanEpoch = scanEpoch,
                 source = "api",
-                hasExactDate = hasValidDate and true or false,
+                hasExactDate = hasExactDate and true or false,
             }
-            e.epoch = hasValidDate and GBL_BuildEpoch(e.year, e.month, e.day, e.hour) or time()
-            e.relativeText = hasValidDate and nil or nil
-            e.dateText = hasValidDate and GBL_DateText(e) or date("%Y-%m-%d %H:%M", e.epoch)
+            e.epoch = derivedEpoch
+            e.relativeText = hasExactDate and nil or GBL_AgePartsToText(year, month, day, hour)
+            GBL_EnsureCanonicalTime(e)
+            e.dateText = hasExactDate and GBL_DateText(e) or (GBL_EffectiveEpoch(e) > 0 and date("%d/%m/%Y %H:%M", GBL_EffectiveEpoch(e)) or "Unknown (game log timestamp unavailable)")
+            GBL_EnsureTxId(e)
             e.fingerprint = GBL_Fingerprint(e)
             entries[#entries + 1] = e
         end
@@ -1059,10 +1641,108 @@ local function GBL_ReadTabTransactions(tab, entries, scanBy)
 
     GBL_Debug("Tab " .. tostring(tab) .. " API entries added=" .. tostring(#entries - before))
 
-    if #entries == before then
-        GBL_Debug("Tab " .. tostring(tab) .. " API returned no entries, attempting text scrape fallback")
-        GBL_ScrapeVisibleLogFrame(tab, entries, scanBy)
+    if gblScanState and gblScanState.interactiveSweep then
+        local beforeScrape = #entries
+        local scraped = GBL_ScrapeVisibleLogFrame(tab, entries, scanBy)
+        GBL_Debug("Tab " .. tostring(tab) .. " interactive scrape added=" .. tostring((#entries - beforeScrape)) .. " raw=" .. tostring(scraped or 0))
     end
+
+    if #entries == before then
+        local canScrapeVisible = (GuildBankFrame and GuildBankFrame.mode == "log") and (GetCurrentGuildBankTab and (tonumber(GetCurrentGuildBankTab()) or 0) == tonumber(tab))
+        if canScrapeVisible then
+            GBL_Debug("Tab " .. tostring(tab) .. " API returned no entries; using visible log text fallback")
+            GBL_ScrapeVisibleLogFrame(tab, entries, scanBy)
+        else
+            GBL_Debug("Tab " .. tostring(tab) .. " API returned no entries; passive mode (no visible fallback)")
+        end
+    end
+end
+
+local function GBL_ReadMoneyTransactions(entries, scanBy)
+    if not entries then return end
+    if not GetNumGuildBankMoneyTransactions or not GetGuildBankMoneyTransaction then
+        GBL_Debug("Money log API unavailable")
+        return
+    end
+    local okN, n = pcall(GetNumGuildBankMoneyTransactions)
+    if not okN or type(n) ~= "number" or n <= 0 then
+        GBL_Debug("Money log count unavailable or empty")
+        return
+    end
+
+    GBL_Debug("Money log entries count=" .. tostring(n))
+    for i = 1, n do
+        local ok, txType, actor, amount, y, m, d, h = pcall(GetGuildBankMoneyTransaction, i)
+        if ok and txType then
+            local yy = tonumber(y) or 0
+            local mm = tonumber(m) or 0
+            local dd = tonumber(d) or 0
+            local hh = tonumber(h) or 0
+            local hasExactDate = yy > 1900 and mm > 0 and dd > 0
+            local scanEpoch = time()
+            local derivedEpoch = hasExactDate and GBL_BuildEpoch(yy, mm, dd, hh) or GBL_DeriveEpochFromAgeParts(yy, mm, dd, hh, scanEpoch)
+            local e = {
+                kind = "money",
+                txType = txType,
+                actor = actor or "?",
+                itemID = 0,
+                itemLink = nil,
+                itemName = "Gold",
+                count = tonumber(amount) or 0,
+                tab1 = 0,
+                tab2 = 0,
+                year = yy,
+                month = mm,
+                day = dd,
+                hour = hh,
+                scanBy = scanBy or MTR.playerName or "?",
+                scanTS = date("%Y-%m-%d %H:%M"),
+                scanEpoch = scanEpoch,
+                source = "api-money",
+                hasExactDate = hasExactDate and true or false,
+            }
+            e.epoch = derivedEpoch
+            e.relativeText = hasExactDate and nil or GBL_AgePartsToText(yy, mm, dd, hh)
+            GBL_EnsureCanonicalTime(e)
+            e.dateText = hasExactDate and GBL_DateText(e) or (GBL_EffectiveEpoch(e) > 0 and date("%d/%m/%Y %H:%M", GBL_EffectiveEpoch(e)) or "Unknown (game money-log timestamp unavailable)")
+            GBL_EnsureTxId(e)
+            e.fingerprint = GBL_Fingerprint(e)
+            entries[#entries + 1] = e
+        end
+    end
+end
+
+local function GBL_RestoreGuildBankView(endAtTab1, origMode, origTab)
+    if not (GuildBankFrame and GuildBankFrame:IsShown()) then return end
+
+    local targetMode = endAtTab1 and "bank" or (origMode or "bank")
+    local targetTab = endAtTab1 and 1 or (tonumber(origTab) or 1)
+    if targetTab <= 0 then targetTab = 1 end
+
+    local function applyNow()
+        if not (GuildBankFrame and GuildBankFrame:IsShown()) then return end
+
+        GuildBankFrame.mode = targetMode
+        if targetMode == "bank" and SetCurrentGuildBankTab then
+            pcall(SetCurrentGuildBankTab, targetTab)
+        end
+
+        if GuildBankFrame_Update then
+            pcall(GuildBankFrame_Update)
+        end
+    end
+
+    MTR.TickRemove("gb_restore_view_1")
+    MTR.TickRemove("gb_restore_view_2")
+    applyNow()
+    MTR.TickAdd("gb_restore_view_1", 0.25, function()
+        MTR.TickRemove("gb_restore_view_1")
+        applyNow()
+    end)
+    MTR.TickAdd("gb_restore_view_2", 0.75, function()
+        MTR.TickRemove("gb_restore_view_2")
+        applyNow()
+    end)
 end
 
 local function GBL_FinalizeScan()
@@ -1072,23 +1752,32 @@ local function GBL_FinalizeScan()
     gblScanState.waitingTab = nil
     MTR.TickRemove("gb_ledger_timeout")
 
-    local added = GBL_MergeEntries(entries, scanBy, date("%Y-%m-%d %H:%M"))
+    if gblScanState.interactiveSweep then
+        GBL_RestoreGuildBankView(gblScanState.endAtTab1, gblScanState.origMode, gblScanState.origTab)
+    end
+
+    local added, updated = GBL_MergeEntries(entries, scanBy, date("%Y-%m-%d %H:%M"))
     local db = GBL_DB()
     db.meta.lastScanBy = scanBy
     db.meta.lastScanAt = date("%Y-%m-%d %H:%M")
     db.meta.lastRawSeen = #entries
 
-    GBL_Debug("Finalize scan: rawEntries=" .. tostring(#entries) .. " mergedNew=" .. tostring(added) .. " retained=" .. tostring(#(db.entries or {})))
+    GBL_Debug("Finalize scan: rawEntries=" .. tostring(#entries) .. " mergedNew=" .. tostring(added) .. " mergedUpdated=" .. tostring(updated or 0) .. " retained=" .. tostring(#(db.entries or {})))
 
-    if added > 0 then
+    if added > 0 or (tonumber(updated) or 0) > 0 or gblScanState.forceBroadcast then
         GBL_Broadcast(db.entries, "scan")
-        MTR.dprint("GuildBank ledger scan merged", added, "new entries")
+        MTR.dprint("GuildBank ledger scan merged", added, "new and", tostring(updated or 0), "updated entries")
     else
         MTR.dprint("GuildBank ledger scan found 0 new entries; raw visible entries =", #entries)
         if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
             DEFAULT_CHAT_FRAME:AddMessage("|cffff6666[MTR Ledger]|r Scan finished with 0 captured entries. Enable Debug and run |cffffff00/mek ledgerdebug show|r to dump the logic path.")
         end
     end
+    gblScanState.forceBroadcast = false
+    gblScanState.interactiveSweep = false
+    gblScanState.endAtTab1 = false
+    gblScanState.origMode = nil
+    gblScanState.origTab = nil
 end
 
 local function GBL_QueryNextTab()
@@ -1105,18 +1794,9 @@ local function GBL_QueryNextTab()
     gblScanState.waitingTab = tab
     GBL_Debug("Queue tab " .. tostring(tab) .. " of " .. tostring(gblScanState.tabs and #gblScanState.tabs or 0))
 
-    if SetCurrentGuildBankTab then
-        local ok, err = pcall(SetCurrentGuildBankTab, tab)
-        GBL_Debug("SetCurrentGuildBankTab(" .. tostring(tab) .. ") ok=" .. tostring(ok) .. " err=" .. tostring(err))
-    else
-        GBL_Debug("SetCurrentGuildBankTab unavailable")
-    end
-
-    if GuildBankFrame then
-        GuildBankFrame.mode = "log"
-        GBL_Debug("GuildBankFrame.mode forced to " .. tostring(GuildBankFrame.mode))
-    else
-        GBL_Debug("GuildBankFrame missing")
+    if gblScanState.interactiveSweep then
+        if SetCurrentGuildBankTab then pcall(SetCurrentGuildBankTab, tab) end
+        if GuildBankFrame then GuildBankFrame.mode = "log" end
     end
 
     if QueryGuildBankLog then
@@ -1136,7 +1816,8 @@ local function GBL_QueryNextTab()
     end)
 end
 
-local function GBL_CollectTransactions(scanBy)
+local function GBL_CollectTransactions(scanBy, opts)
+    opts = opts or {}
     if gblScanState.active then return end
     local numTabs = GetNumGuildBankTabs and (GetNumGuildBankTabs() or 0) or 0
     GBL_Debug("BeginLocalScan by=" .. tostring(scanBy or MTR.playerName or "?") .. " numTabs=" .. tostring(numTabs) .. " gbFrameShown=" .. tostring(GuildBankFrame and GuildBankFrame:IsShown()))
@@ -1155,21 +1836,42 @@ local function GBL_CollectTransactions(scanBy)
     gblScanState.idx = 0
     gblScanState.entries = {}
     gblScanState.waitingTab = nil
+    gblScanState.forceBroadcast = (opts.forceBroadcast == true)
+    gblScanState.interactiveSweep = (opts.interactiveSweep == true)
+    gblScanState.endAtTab1 = (opts.endAtTab1 == true)
+    gblScanState.origMode = (GuildBankFrame and GuildBankFrame.mode) or nil
+    gblScanState.origTab = (GetCurrentGuildBankTab and tonumber(GetCurrentGuildBankTab()) or 0)
 
     for tab = 1, numTabs do
         gblScanState.tabs[#gblScanState.tabs + 1] = tab
     end
+
+    if QueryGuildBankLog then pcall(QueryGuildBankLog, 0) end
+    GBL_ReadMoneyTransactions(gblScanState.entries, gblScanState.scanBy)
 
     GBL_QueryNextTab()
 end
 
 local gblScanFrame = CreateFrame("Frame")
 gblScanFrame:RegisterEvent("GUILDBANKLOG_UPDATE")
-gblScanFrame:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED")
-gblScanFrame:RegisterEvent("GUILDBANK_UPDATE_TABS")
 gblScanFrame:SetScript("OnEvent", function(_, event)
     GBL_Debug("Event fired: " .. tostring(event) .. " waitingTab=" .. tostring(gblScanState.waitingTab))
-    if not gblScanState.active then return end
+    if not gblScanState.active then
+        local canCapture = GuildBankFrame and GuildBankFrame:IsShown() and GuildBankFrame.mode == "log" and GetCurrentGuildBankTab
+        if canCapture then
+            local tab = tonumber(GetCurrentGuildBankTab()) or 0
+            if tab > 0 then
+                local temp = {}
+                local addedRaw = GBL_ScrapeVisibleLogFrame(tab, temp, MTR.playerName or "?")
+                local merged = GBL_MergeEntries(temp, MTR.playerName or "?", date("%Y-%m-%d %H:%M"))
+                if merged > 0 then
+                    GBL_Broadcast(GBL_DB().entries, "passive-log")
+                end
+                GBL_Debug("Passive visible-log capture tab=" .. tostring(tab) .. " raw=" .. tostring(addedRaw) .. " merged=" .. tostring(merged))
+            end
+        end
+        return
+    end
     local tab = gblScanState.waitingTab
     if not tab then return end
 
@@ -1191,11 +1893,12 @@ end
 
 function GBL.RequestSync()
     if not IsInGuild() then return end
-    if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:R:" .. (MTR.playerName or "?")) else SendAddonMessage(GBL_PREFIX, "GL:R:" .. (MTR.playerName or "?"), "GUILD") end
+    local ss = GBL_SyncState()
+    if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, "GL:R:" .. (MTR.playerName or "?") .. ":" .. tostring(ss.hash or "0")) else SendAddonMessage(GBL_PREFIX, "GL:R:" .. (MTR.playerName or "?") .. ":" .. tostring(ss.hash or "0"), "GUILD") end
 end
 
-function GBL.BeginLocalScan(scanBy)
-    GBL_CollectTransactions(scanBy)
+function GBL.BeginLocalScan(scanBy, opts)
+    GBL_CollectTransactions(scanBy, opts)
 end
 
 local gblRecvFrame = CreateFrame("Frame")
@@ -1203,24 +1906,72 @@ gblRecvFrame:RegisterEvent("CHAT_MSG_ADDON")
 gblRecvFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= GBL_PREFIX then return end
     if not MTR.initialized then return end
-    local senderName = (sender or ""):match("^([^%-]+)") or sender or ""
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, false)) or message, ((sender or ""):match("^([^%-]+)") or sender or "")
+    if not unpacked then return end
 
-    if message:sub(1, 5) == "GL:R:" then
-        if senderName ~= MTR.playerName and MTR.isOfficer then
-            GBL_Broadcast(GBL.GetEntries(), "reply")
+    if unpacked:sub(1, 5) == "GL:R:" then
+        local _, peerHash = unpacked:match("^GL:R:([^:]*):?(.*)$")
+        if senderName ~= MTR.playerName then
+            local ss = GBL_SyncState()
+            if tostring(peerHash or "") ~= tostring(ss.hash or "0") then
+                GBL_Broadcast(GBL.GetEntries(), "reply")
+            end
         end
-    elseif message:sub(1, 5) == "GL:S:" then
+    elseif unpacked:sub(1, 7) == "GL:ACK:" then
+        local peer, hash, rev = unpacked:match("^GL:ACK:([^:]+):([^:]+):([^:]+)$")
+        local ss = GBL_SyncState()
+        if tostring(hash or "") == tostring(ss.hash or "0") then
+            ss.lastAckByPeer = ss.lastAckByPeer or {}
+            ss.lastAckByPeer[peer or senderName or "?"] = { revision = tonumber(rev) or 0, at = time() }
+        end
+    elseif unpacked:sub(1, 5) == "GL:S:" then
         gblRecvBuf = {}
-    elseif message:sub(1, 5) == "GL:D:" and gblRecvBuf then
-        for token in message:sub(6):gmatch("[^;]+") do
+        local _, _, _, _, rev, hash = unpacked:match("^GL:S:([^:]*):([^:]*):([^:]*):([^:]*):?([^:]*):?(.*)$")
+        gblRecvRev = tonumber(rev) or nil
+        gblRecvHash = (hash and hash ~= "") and hash or nil
+    elseif unpacked:sub(1, 5) == "GL:D:" and gblRecvBuf then
+        local d = unpacked:sub(6)
+        for token in d:gmatch("[^;]+") do
             local e = GBL_TokenToEntry(token)
             if e then gblRecvBuf[#gblRecvBuf + 1] = e end
         end
-    elseif message:sub(1, 5) == "GL:E:" and gblRecvBuf then
+    elseif unpacked:sub(1, 5) == "GL:E:" and gblRecvBuf then
         if senderName ~= MTR.playerName then
-            GBL_MergeEntries(gblRecvBuf, senderName, message:sub(6))
+            local ok = true
+            local ss = GBL_SyncState()
+            ss.lastRevByPeer = ss.lastRevByPeer or {}
+            local hashMismatch = false
+            if gblRecvHash then
+                local rh = GBL_HashEntries(gblRecvBuf)
+                if rh ~= gblRecvHash then hashMismatch = true end
+            end
+            local peerKey = tostring(senderName or "?")
+            local peerPrevRev = tonumber(ss.lastRevByPeer[peerKey] or 0)
+            if ok and hashMismatch then
+                ss.lastConflictAt = time()
+                ss.lastConflictFrom = peerKey
+                ss.lastConflictReason = "hash-mismatch-accepted"
+                MTR.dprint("Ledger hash mismatch accepted from", peerKey, "(using officer payload)")
+            end
+            if ok then
+                GBL_MergeEntries(gblRecvBuf, senderName, unpacked:sub(6))
+                if gblRecvRev then ss.revision = math.max(tonumber(ss.revision or 0), tonumber(gblRecvRev or 0)) end
+                ss.hash = GBL_HashEntries(gblRecvBuf)
+                if gblRecvRev then ss.lastRevByPeer[peerKey] = tonumber(gblRecvRev) or peerPrevRev end
+                ss.lastSyncAt = time()
+                ss.lastSyncFrom = senderName or ss.lastSyncFrom or "?"
+                ss.lastConflictReason = nil
+                if MTR.SendGuildScoped then MTR.SendGuildScoped(GBL_PREFIX, string.format("GL:ACK:%s:%s:%d", tostring(MTR.playerName or "?"), tostring(ss.hash or "0"), tonumber(ss.revision or 0))) else SendAddonMessage(GBL_PREFIX, string.format("GL:ACK:%s:%s:%d", tostring(MTR.playerName or "?"), tostring(ss.hash or "0"), tonumber(ss.revision or 0)), "GUILD") end
+            else
+                ss.lastConflictAt = time()
+                ss.lastConflictFrom = tostring(senderName or "?")
+                ss.lastConflictReason = "hash-mismatch"
+                MTR.MPE("[Ledger Sync] Rejected ledger snapshot from " .. tostring(senderName or "?") .. " (stale or hash mismatch).")
+            end
         end
         gblRecvBuf = nil
+        gblRecvRev = nil
+        gblRecvHash = nil
     end
 end)
 

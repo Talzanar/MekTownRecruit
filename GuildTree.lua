@@ -61,7 +61,55 @@ local function GTBroadcast(msg)
     if IsInGuild() then SendAddonMessage(GT_PREFIX, msg, "GUILD") end
 end
 
+local gtMuteTouch = false
+local GTTouch
+
+local function CanonName(name)
+    name = tostring(name or ""):match("^%s*(.-)%s*$") or ""
+    if name == "" then return "" end
+    local short = name:match("^([^%-]+)") or name
+    local want = string.lower(short)
+    local num = GetNumGuildMembers() or 0
+    for i = 1, num do
+        local n = GetGuildRosterInfo(i)
+        local sn = n and (n:match("^([^%-]+)") or n)
+        if sn and string.lower(sn) == want then
+            return sn
+        end
+    end
+    return short
+end
+
+local function IsSelfName(name)
+    local selfName = CanonName(MTR.playerName or "")
+    local n = CanonName(name or "")
+    return selfName ~= "" and n ~= "" and selfName == n
+end
+
+local function CanEditTreeLocal(charName)
+    if MTR.isOfficer or MTR.isGM then return true end
+    return IsSelfName(charName)
+end
+
+local function IsGTWriteAllowed(actorName, charName)
+    if MTR.IsGuildOfficerName and MTR.IsGuildOfficerName(actorName) then return true end
+    local actor = CanonName(actorName or "")
+    local char = CanonName(charName or "")
+    return actor ~= "" and char ~= "" and actor == char
+end
+
+local function GTSyncState()
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or nil
+    if not gs then return { revision = 0, hash = "0", lastSyncAt = 0 } end
+    gs.syncState = gs.syncState or {}
+    gs.syncState.guildTree = gs.syncState.guildTree or { revision = 0, hash = "0", lastSyncAt = 0, lastAckByPeer = {} }
+    return gs.syncState.guildTree
+end
+
 local function GTApplySet(charName, mainName)
+    charName = CanonName(charName)
+    mainName = CanonName(mainName)
+    if charName == "" or mainName == "" or charName == mainName then return end
     local ft = FT()
     if not ft then return end
     if not ft[mainName] then
@@ -85,9 +133,12 @@ local function GTApplySet(charName, mainName)
         ft[mainName].alts[#ft[mainName].alts + 1] = charName
     end
     if MTR.AppendGuildEvent then MTR.AppendGuildEvent("guildTree", "setAlt", tostring(charName or "") .. "|" .. tostring(mainName or "")) end
+    if not gtMuteTouch then GTTouch() end
 end
 
 local function GTApplyMain(charName)
+    charName = CanonName(charName)
+    if charName == "" then return end
     local ft = FT()
     if not ft then return end
     local prev = ft[charName]
@@ -99,9 +150,12 @@ local function GTApplyMain(charName)
     end
     ft[charName] = { isMain = true, alts = (prev and prev.alts) or {} }
     if MTR.AppendGuildEvent then MTR.AppendGuildEvent("guildTree", "setMain", tostring(charName or "")) end
+    if not gtMuteTouch then GTTouch() end
 end
 
 local function GTApplyDel(charName)
+    charName = CanonName(charName)
+    if charName == "" then return end
     local ft = FT()
     if not ft then return end
     local entry = ft[charName]
@@ -123,6 +177,7 @@ local function GTApplyDel(charName)
     end
     ft[charName] = nil
     if MTR.AppendGuildEvent then MTR.AppendGuildEvent("guildTree", "delete", tostring(charName or "")) end
+    if not gtMuteTouch then GTTouch() end
 end
 
 local function GTEncodeFull()
@@ -134,7 +189,91 @@ local function GTEncodeFull()
             parts[#parts + 1] = name .. "|" .. entry.main
         end
     end
+    table.sort(parts)
     return table.concat(parts, ";")
+end
+
+GTTouch = function()
+    local st = GTSyncState()
+    st.revision = tonumber(st.revision or 0) + 1
+    st.hash = (MTR.Hash and MTR.Hash(GTEncodeFull())) or "0"
+    st.lastSyncAt = time()
+    return st
+end
+
+local function GTBuildChunks(payload)
+    local chunks, chunk = {}, ""
+    payload = tostring(payload or "")
+    for token in payload:gmatch("[^;]+") do
+        if #chunk + #token + 1 > 200 then
+            if chunk ~= "" then chunks[#chunks + 1] = chunk end
+            chunk = token
+        else
+            chunk = (chunk == "" and token) or (chunk .. ";" .. token)
+        end
+    end
+    if chunk ~= "" then chunks[#chunks + 1] = chunk end
+    return chunks
+end
+
+local function GTApplyFull(payload)
+    local ft = FT()
+    if not ft then return 0 end
+    for k in pairs(ft) do ft[k] = nil end
+    local num = GetNumGuildMembers() or 0
+    for i = 1, num do
+        local name = GetGuildRosterInfo(i)
+        if name then
+            local shortName = name:match("^([^%-]+)") or name
+            if not ft[shortName] then
+                ft[shortName] = { isMain = true, alts = {} }
+            end
+        end
+    end
+    local added = 0
+    for pair in tostring(payload or ""):gmatch("([^;]+)") do
+        local cn, mn = pair:match("^([^|]+)|(.+)$")
+        if cn and mn then
+            cn = CanonName(cn)
+            mn = CanonName(mn)
+            if cn ~= "" and mn ~= "" and cn ~= mn then
+            if not ft[mn] then ft[mn] = { isMain = true, alts = {} } end
+            local old = ft[cn]
+            if old and not old.isMain and old.main and ft[old.main] then
+                local prev = ft[old.main].alts or {}
+                for i = #prev, 1, -1 do
+                    if prev[i] == cn then tremove(prev, i) end
+                end
+            end
+            ft[cn] = { isMain = false, main = mn }
+            ft[mn].alts = ft[mn].alts or {}
+            local found = false
+            for _, a in ipairs(ft[mn].alts) do
+                if a == cn then found = true break end
+            end
+            if not found then ft[mn].alts[#ft[mn].alts + 1] = cn end
+            added = added + 1
+            end
+        end
+    end
+    GTTouch()
+    return added
+end
+
+local function GTSendFull(reason)
+    if not (MTR.isOfficer or MTR.isGM) then return false end
+    local payload = GTEncodeFull()
+    local st = GTSyncState()
+    local hash = (MTR.Hash and MTR.Hash(payload)) or "0"
+    st.hash = hash
+    st.lastBroadcastAt = time()
+    st.lastBroadcastReason = reason or "sync"
+    local chunks = GTBuildChunks(payload)
+    GTBroadcast(string.format("GT:MET:%d:%s:%d", tonumber(st.revision or 0), tostring(hash), #chunks))
+    for _, c in ipairs(chunks) do GTBroadcast("GT:D:" .. c) end
+    if #chunks == 0 then GTBroadcast("GT:D:") end
+    GTBroadcast("GT:END:" .. tostring(reason or "sync"))
+    return true
 end
 
 -- ============================================================================
@@ -150,22 +289,42 @@ local function ParseMainFromNote(note, shortName)
     note = (note:match("^%s*(.-)%s*$") or "")
     if note == "" then return nil end
 
-    local lower = string.lower(note)
+    local cleaned = note:gsub("[\"']", "")
+    cleaned = cleaned:gsub("%s+", " ")
+    local lower = string.lower(cleaned)
     local mainName
-    if lower:find("^alt%s*[:%-]") then
-        mainName = note:match("^[Aa][Ll][Tt]%s*[:%-]%s*(.+)$")
+    if lower:find("^alt%s*[|:/%-]") then
+        mainName = cleaned:match("^[Aa][Ll][Tt]%s*[|:/%-]%s*(.+)$")
     elseif lower:find("^alt%s+of%s+") then
-        mainName = note:match("^[Aa][Ll][Tt]%s+[Oo][Ff]%s+(.+)$")
+        mainName = cleaned:match("^[Aa][Ll][Tt]%s+[Oo][Ff]%s+(.+)$")
+    elseif lower:find("^alt%s+or%s+") then
+        mainName = cleaned:match("^[Aa][Ll][Tt]%s+[Oo][Rr]%s+(.+)$")
     elseif lower:find("^main%s*[:%-]") then
-        mainName = note:match("^[Mm][Aa][Ii][Nn]%s*[:%-]%s*(.+)$")
+        mainName = cleaned:match("^[Mm][Aa][Ii][Nn]%s*[:%-]%s*(.+)$")
+    elseif lower:find("^main%s+or%s+") then
+        mainName = cleaned:match("^[Mm][Aa][Ii][Nn]%s+[Oo][Rr]%s+(.+)$")
+    elseif lower:find("%s*[|:/%-]%s*alt%s*$") then
+        mainName = cleaned:gsub("%s*[|:/%-]%s*[Aa][Ll][Tt]%s*$", "")
     elseif lower:find("%s+alt%s*$") then
-        mainName = note:gsub("%s+[Aa][Ll][Tt]%s*$", "")
-    elseif lower:find("%s*%-%s*alt%s*$") then
-        mainName = note:gsub("%s*%-%s*[Aa][Ll][Tt]%s*$", "")
-    elseif lower:find("%s*>%s*alt%s*$") then
-        mainName = note:gsub("%s*>%s*[Aa][Ll][Tt]%s*$", "")
+        mainName = cleaned:gsub("%s+[Aa][Ll][Tt]%s*$", "")
     end
 
+    if not mainName then
+        local norm = lower
+        norm = norm:gsub("[%-%|:/%(%)]", " ")
+        norm = norm:gsub("%s+", " ")
+        norm = norm:gsub("^%s+", ""):gsub("%s+$", "")
+        if norm:find(" alt ", 1, true) or norm:match(" alt$") or norm:match("^alt ") then
+            norm = norm:gsub("^alt%s+of%s+", "")
+            norm = norm:gsub("^alt%s+or%s+", "")
+            norm = norm:gsub("^alt%s+", "")
+            norm = norm:gsub("%s+alt$", "")
+            norm = norm:gsub("%s+main$", "")
+            norm = norm:gsub("%s+", " ")
+            norm = norm:gsub("^%s+", ""):gsub("%s+$", "")
+            if norm ~= "" then mainName = norm end
+        end
+    end
     if not mainName then return nil end
     mainName = (mainName:match("^%s*(.-)%s*$") or "")
     if mainName == "" then return nil end
@@ -174,9 +333,40 @@ local function ParseMainFromNote(note, shortName)
     if (first == '"' and last == '"') or (first == "'" and last == "'") then
         mainName = string.sub(mainName, 2, -2)
     end
+    mainName = mainName:gsub("%s*[|:/%-]%s*[Aa][Ll][Tt]%s*$", "")
+    mainName = mainName:gsub("%s+[Aa][Ll][Tt]%s*$", "")
     mainName = (mainName:match("^%s*(.-)%s*$") or "")
-    if mainName == "" or mainName == shortName then return nil end
-    return mainName
+    if mainName == "" then return nil end
+
+    local lowerMain = string.lower(mainName)
+    local lowerSelf = string.lower(shortName or "")
+    if lowerMain == lowerSelf then return nil end
+
+    -- Resolve noisy free text to an actual guild character name.
+    local num = GetNumGuildMembers() or 0
+    local cleanedMain = lowerMain:gsub("[^%a%d]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    local bestName, bestLen = nil, 0
+    for i = 1, num do
+        local n = GetGuildRosterInfo(i)
+        local sn = n and (n:match("^([^%-]+)") or n)
+        if sn and sn ~= "" then
+            local ls = string.lower(sn)
+            if ls ~= lowerSelf then
+                if ls == lowerMain then return sn end
+                local lsn = ls:gsub("[^%a%d]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+                if lsn ~= "" then
+                    if cleanedMain == lsn or cleanedMain:find("^" .. lsn .. " ") or cleanedMain:find(" " .. lsn .. " ") or cleanedMain:find(" " .. lsn .. "$") then
+                        local ln = #lsn
+                        if ln > bestLen then
+                            bestLen = ln
+                            bestName = sn
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestName
 end
 
 local function EnsureGuildMemberEntries()
@@ -209,19 +399,36 @@ local function ScanGuildNotes()
     EnsureGuildMemberEntries()
 
     local count = 0
+    gtMuteTouch = true
     for i = 1, num do
         local name, _, _, _, _, _, publicNote, officerNote = GetGuildRosterInfo(i)
         if name then
             local shortName = name:match("^([^%-]+)") or name
-            local mn = ParseMainFromNote(officerNote, shortName) or ParseMainFromNote(publicNote, shortName)
+            -- Public note is treated as authoritative for scan-based relinking.
+            -- This allows members to self-correct outdated officer-note mappings
+            -- by updating their public note and re-running Scan Notes.
+            local mnPublic = ParseMainFromNote(publicNote, shortName)
+            local mnOfficer = ParseMainFromNote(officerNote, shortName)
+            local mn = mnPublic or mnOfficer
+            if MTR.dprint and (officerNote and officerNote ~= "" or publicNote and publicNote ~= "") then
+                MTR.dprint("[GT Scan]", shortName, "officer='" .. tostring(officerNote or "") .. "'", "public='" .. tostring(publicNote or "") .. "'", "parsedPublic='" .. tostring(mnPublic or "") .. "'", "parsedOfficer='" .. tostring(mnOfficer or "") .. "'", "applied='" .. tostring(mn or "") .. "'")
+            end
             if mn and mn ~= shortName then
+                mn = CanonName(mn)
                 GTApplySet(shortName, mn)
                 count = count + 1
-            elseif not ft[shortName] then
-                ft[shortName] = { isMain = true, alts = {} }
+            else
+                local existing = ft[shortName]
+                if existing and not existing.isMain then
+                    GTApplyMain(shortName)
+                elseif not existing then
+                    ft[shortName] = { isMain = true, alts = {} }
+                end
             end
         end
     end
+    gtMuteTouch = false
+    GTTouch()
     return count
 end
 
@@ -230,10 +437,11 @@ end
 -- ============================================================================
 local gtMsgFrame = CreateFrame("Frame")
 gtMsgFrame:RegisterEvent("CHAT_MSG_ADDON")
+local gtRecv = nil
 gtMsgFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= GT_PREFIX then return end
     if not MTR.initialized or not MTR.db then return end
-    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, true)) or message, ((sender or ""):match("^([^%-]+)") or sender or "")
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, false)) or message, ((sender or ""):match("^([^%-]+)") or sender or "")
     if not unpacked then return end
     if senderName == MTR.playerName then return end
 
@@ -242,15 +450,55 @@ gtMsgFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
 
     if cmd == "SET" then
         local cn, mn = payload:match("^([^|]+)|(.+)$")
-        if cn and mn then GTApplySet(cn, mn) end
+        if cn and mn and IsGTWriteAllowed(senderName, cn) then GTApplySet(cn, mn) end
     elseif cmd == "MAIN" then
-        if payload ~= "" then GTApplyMain(payload) end
+        if payload ~= "" and IsGTWriteAllowed(senderName, payload) then GTApplyMain(payload) end
     elseif cmd == "DEL" then
-        if payload ~= "" then GTApplyDel(payload) end
+        if payload ~= "" and IsGTWriteAllowed(senderName, payload) then GTApplyDel(payload) end
     elseif cmd == "REQ" then
         if MTR.isOfficer or MTR.isGM then
-            local encoded = GTEncodeFull()
-            if encoded ~= "" then GTBroadcast("GT:FULL:" .. encoded) end
+            local st = GTSyncState()
+            local peerHash = payload ~= "" and payload or nil
+            if not peerHash or peerHash ~= tostring(st.hash or "0") then
+                GTSendFull("peer-request")
+            end
+        end
+    elseif cmd == "MET" then
+        if not (MTR.IsGuildOfficerName and MTR.IsGuildOfficerName(senderName)) then return end
+        local rev, hash = payload:match("^(%d+):([^:]+):")
+        gtRecv = { rev = tonumber(rev) or 0, hash = hash or "0", chunks = {}, from = senderName }
+    elseif cmd == "D" and gtRecv then
+        if not (MTR.IsGuildOfficerName and MTR.IsGuildOfficerName(senderName)) then return end
+        gtRecv.chunks[#gtRecv.chunks + 1] = payload
+    elseif cmd == "END" and gtRecv then
+        if not (MTR.IsGuildOfficerName and MTR.IsGuildOfficerName(senderName)) then return end
+        local st = GTSyncState()
+        local incomingRev = tonumber(gtRecv.rev) or 0
+        local localRev = tonumber(st.revision or 0)
+        if incomingRev >= localRev then
+            local raw = table.concat(gtRecv.chunks, ";")
+            local h = (MTR.Hash and MTR.Hash(raw)) or "0"
+            if h == tostring(gtRecv.hash or "0") or #gtRecv.chunks == 0 then
+                GTApplyFull(raw)
+                st.revision = incomingRev
+                st.hash = h
+                st.lastSyncAt = time()
+                GTBroadcast(string.format("GT:ACK:%s:%s:%d", tostring(MTR.playerName or "?"), tostring(st.hash or "0"), tonumber(st.revision or 0)))
+            else
+                st.lastConflictAt = time()
+                st.lastConflictFrom = tostring(gtRecv.from or "?")
+                st.lastConflictReason = "hash-mismatch"
+                MTR.MPE("[GuildTree Sync] Snapshot hash mismatch from " .. tostring(gtRecv.from or "?"))
+            end
+        end
+        gtRecv = nil
+    elseif cmd == "ACK" then
+        if not (MTR.IsGuildOfficerName and MTR.IsGuildOfficerName(senderName)) then return end
+        local peer, hash, rev = payload:match("^([^:]+):([^:]+):([^:]+)$")
+        local st = GTSyncState()
+        if tostring(hash or "") == tostring(st.hash or "0") then
+            st.lastAckByPeer = st.lastAckByPeer or {}
+            st.lastAckByPeer[peer or senderName or "?"] = { revision = tonumber(rev) or 0, at = time() }
         end
     elseif cmd == "FULL" then
         if payload ~= "" then
@@ -258,6 +506,7 @@ gtMsgFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
                 local cn, mn = pair:match("^([^|]+)|(.+)$")
                 if cn and mn then GTApplySet(cn, mn) end
             end
+            GTTouch()
         end
     end
 
@@ -284,7 +533,8 @@ gtInitFrame:SetScript("OnEvent", function()
             GuildRoster()  -- request fresh roster data
             MTR.After(2, function()
                 ScanGuildNotes()
-                GTBroadcast("GT:REQ")
+                local st = GTSyncState()
+                GTBroadcast("GT:REQ:" .. tostring(st.hash or "0"))
             end)
         end
     end)
@@ -294,16 +544,21 @@ end)
 -- PUBLIC API
 -- ============================================================================
 function MTR.GTSetAlt(charName, mainName)
-    if not (MTR.isOfficer or MTR.isGM) then MTR.MPE("Officers only.") return end
+    if not CanEditTreeLocal(charName) then MTR.MPE("You can only set alt/main links for your own character.") return end
+    charName = CanonName(charName)
+    mainName = CanonName(mainName)
+    if charName == "" or mainName == "" or charName == mainName then MTR.MPE("Invalid character/main pair.") return end
     GTApplySet(charName, mainName)
     GTBroadcast("GT:SET:" .. charName .. "|" .. mainName)
     -- Write officer note
-    local num = GetNumGuildMembers()
-    for i = 1, num do
-        local n = GetGuildRosterInfo(i)
-        if n == charName then
-            GuildRosterSetOfficerNote(i, "Alt:" .. mainName)
-            break
+    if MTR.isOfficer or MTR.isGM then
+        local num = GetNumGuildMembers()
+        for i = 1, num do
+            local n = GetGuildRosterInfo(i)
+            if CanonName(n) == charName then
+                GuildRosterSetOfficerNote(i, "Alt:" .. mainName)
+                break
+            end
         end
     end
     if MTR.RefreshGuildTree then MTR.RefreshGuildTree() end
@@ -311,17 +566,21 @@ function MTR.GTSetAlt(charName, mainName)
 end
 
 function MTR.GTSetMain(charName)
-    if not (MTR.isOfficer or MTR.isGM) then MTR.MPE("Officers only.") return end
+    if not CanEditTreeLocal(charName) then MTR.MPE("You can only set alt/main links for your own character.") return end
+    charName = CanonName(charName)
+    if charName == "" then MTR.MPE("Invalid character name.") return end
     GTApplyMain(charName)
     GTBroadcast("GT:MAIN:" .. charName)
-    local num = GetNumGuildMembers()
-    for i = 1, num do
-        local n, _, _, _, _, _, _, officerNote = GetGuildRosterInfo(i)
-        if n == charName then
-            if (officerNote or ""):match("^[Aa]lt:") then
-                GuildRosterSetOfficerNote(i, "")
+    if MTR.isOfficer or MTR.isGM then
+        local num = GetNumGuildMembers()
+        for i = 1, num do
+            local n, _, _, _, _, _, _, officerNote = GetGuildRosterInfo(i)
+            if CanonName(n) == charName then
+                if (officerNote or ""):match("^[Aa]lt:") then
+                    GuildRosterSetOfficerNote(i, "")
+                end
+                break
             end
-            break
         end
     end
     if MTR.RefreshGuildTree then MTR.RefreshGuildTree() end
@@ -329,7 +588,9 @@ function MTR.GTSetMain(charName)
 end
 
 function MTR.GTRemove(charName)
-    if not (MTR.isOfficer or MTR.isGM) then MTR.MPE("Officers only.") return end
+    if not CanEditTreeLocal(charName) then MTR.MPE("You can only unlink your own character.") return end
+    charName = CanonName(charName)
+    if charName == "" then MTR.MPE("Invalid character name.") return end
     GTApplyDel(charName)
     GTBroadcast("GT:DEL:" .. charName)
     if MTR.RefreshGuildTree then MTR.RefreshGuildTree() end
@@ -403,10 +664,6 @@ local function InstallGuildTreePopupMenu()
     hooksecurefunc("UnitPopup_OnClick", function(self)
         if not self or not self.value then return end
         if self.value ~= "MTR_SET_MAIN" and self.value ~= "MTR_SET_ALT" then return end
-        if not (MTR.isOfficer or MTR.isGM) then
-            if MTR.MPE then MTR.MPE("Officers only.") end
-            return
-        end
         local unit = self.unit
         if (not unit) and UIDROPDOWNMENU_INIT_MENU then unit = UIDROPDOWNMENU_INIT_MENU.unit end
         local name = unit and UnitName(unit)
@@ -454,7 +711,7 @@ function MTR.BuildGuildTreeTab(t)
     MakeLabel(t, "|cffd4af37Guild Tree|r", "GameFontNormalLarge", 10, -10, 900)
     MakeLabel(t,
         canManage and "Scalable rank-filtered guild tree with compact main/alt nesting. Officers can scan notes, link mains/alts, and use right-click profile menu actions."
-                  or "Scalable rank-filtered guild tree with compact main/alt nesting. Members can browse the full tree in a readable single-column view.",
+                  or "Scalable rank-filtered guild tree with compact main/alt nesting. Members can set their own main/alt via right-click unit menu actions.",
         "GameFontNormalSmall", 10, -34, 980)
 
     local topY = -60
@@ -502,6 +759,7 @@ function MTR.BuildGuildTreeTab(t)
         scanBtn:SetText("Scan Notes")
         scanBtn:SetScript("OnClick", function()
             GuildRoster()
+            MTR.After(0.2, function() GuildRoster() end)
             local function doScan()
                 local count = ScanGuildNotes() or 0
                 if MTR.RefreshGuildTree then MTR.RefreshGuildTree() end
@@ -509,6 +767,7 @@ function MTR.BuildGuildTreeTab(t)
             end
             MTR.After(0.5, doScan)
             MTR.After(1.5, doScan)
+            MTR.After(3.0, doScan)
         end)
         topY = -92
     end

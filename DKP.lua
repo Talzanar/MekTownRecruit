@@ -12,6 +12,19 @@ MTR.DKP_ADDON_PREFIX = DKP_ADDON_PREFIX
 -- to it immediately. Drained by DKPSyncToRaidSafe via DHFlushQueue().
 local dhQueue = {}
 
+local function DKPNextTxId(playerName)
+    MTR.db = MTR.db or {}
+    MTR.db.syncMeta = MTR.db.syncMeta or {}
+    local seq = tonumber(MTR.db.syncMeta.dkpTxSeq or 0) + 1
+    MTR.db.syncMeta.dkpTxSeq = seq
+    return table.concat({
+        tostring(MTR.playerName or "?"),
+        tostring(time() or 0),
+        tostring(seq),
+        tostring(playerName or "?")
+    }, "#")
+end
+
 -- ============================================================================
 -- LEDGER CORE
 -- ============================================================================
@@ -31,6 +44,7 @@ function MTR.DKPAdd(name, amount, reason, officer)
         balance = e.balance,
         reason  = reason or "Manual",
         officer = officer or MTR.playerName or "System",
+        txid    = DKPNextTxId(name),
     }
     table.insert(e.history, entry)
     if #e.history > 200 then tremove(e.history, 1) end
@@ -41,7 +55,7 @@ function MTR.DKPAdd(name, amount, reason, officer)
     MTR.TickRemove("dkp_autosync")
     MTR.TickAdd("dkp_autosync", 3, function()
         MTR.TickRemove("dkp_autosync")
-        if MTR.isOfficer and IsInGuild() then MTR.DKPSyncToRaidSafe() end
+        if MTR.CanAccess and MTR.CanAccess("DKP") and IsInGuild() then MTR.DKPSyncToRaidSafe() end
     end)
 end
 
@@ -56,6 +70,7 @@ function MTR.DKPSet(name, amount, officer)
         balance = e.balance,
         reason  = "Balance set by officer (was " .. old .. ")",
         officer = officer or MTR.playerName or "System",
+        txid    = DKPNextTxId(name),
     }
     table.insert(e.history, entry)
     if #e.history > 200 then tremove(e.history, 1) end
@@ -83,7 +98,7 @@ function MTR.DKPStandings()
 end
 
 function MTR.DKPPublish(channel, target)
-    if not (MTR.isOfficer or MTR.isGM) then MTR.MPE("Officers only.") return end
+    if not (MTR.CanAccess and MTR.CanAccess("DKP")) then MTR.MPE("No DKP publish permission.") return end
     local chan = (channel or MTR.db.dkpPublishChannel):upper()
     local standings = MTR.DKPStandings()
     local function Send(msg)
@@ -105,27 +120,61 @@ end
 -- BULK AWARD
 -- ============================================================================
 function MTR.DKPBulkAward(names, amount, reason)
-    if not (MTR.isOfficer or MTR.isGM) then MTR.MPE("Officers only.") return end
+    if not (MTR.CanAccess and MTR.CanAccess("DKP")) then MTR.MPE("No DKP write permission.") return end
     local count = 0
+    local skipped = 0
     for _, name in ipairs(names) do
-        MTR.DKPAdd(name, amount, reason or "Bulk award", MTR.playerName)
-        count = count + 1
+        if MTR.IsCurrentGuildMemberName and not MTR.IsCurrentGuildMemberName(name) then
+            skipped = skipped + 1
+        else
+            MTR.DKPAdd(name, amount, reason or "Bulk award", MTR.playerName)
+            count = count + 1
+        end
     end
-    MTR.MP("Awarded " .. amount .. " DKP to " .. count .. " players: " .. (reason or "Bulk award"))
+    MTR.MP("Awarded " .. amount .. " DKP to " .. count .. " guild members: " .. (reason or "Bulk award"))
+    if skipped > 0 then
+        MTR.MP("Skipped " .. skipped .. " non-guild player(s).")
+    end
+end
+
+local function IsGuildEligibleUnit(unit, name)
+    if unit and UnitExists and UnitExists(unit) then
+        if UnitIsInMyGuild then
+            local ok = UnitIsInMyGuild(unit)
+            if ok ~= nil then return ok and true or false end
+        end
+        local myGuild = GetGuildInfo and GetGuildInfo("player") or nil
+        local unitGuild = GetGuildInfo and GetGuildInfo(unit) or nil
+        if myGuild and unitGuild and myGuild ~= "" and unitGuild ~= "" then
+            return myGuild == unitGuild
+        end
+    end
+    if MTR.IsCurrentGuildMemberName then
+        return MTR.IsCurrentGuildMemberName(name)
+    end
+    return true
 end
 
 function MTR.DKPGetRaidMembers()
     local members = {}
     if IsInRaid() then
         for i = 1, GetNumRaidMembers() do
-            local n = UnitName("raid"..i)
-            if n then members[#members+1] = n end
+            local unit = "raid"..i
+            local n = UnitName(unit)
+            if n and IsGuildEligibleUnit(unit, n) then
+                members[#members+1] = n
+            end
         end
     elseif IsInGroup() then
-        members[#members+1] = MTR.playerName
+        if MTR.playerName and IsGuildEligibleUnit("player", MTR.playerName) then
+            members[#members+1] = MTR.playerName
+        end
         for i = 1, GetNumPartyMembers() do
-            local n = UnitName("party"..i)
-            if n then members[#members+1] = n end
+            local unit = "party"..i
+            local n = UnitName(unit)
+            if n and IsGuildEligibleUnit(unit, n) then
+                members[#members+1] = n
+            end
         end
     end
     return members
@@ -223,6 +272,7 @@ local function BuildSnapshotRecords()
                 tostring(tonumber(entry.balance) or 0),
                 SanitizeField(entry.reason),
                 SanitizeField(entry.officer),
+                SanitizeField(entry.txid or ""),
             }, "~")
             entryCount = entryCount + 1
         end
@@ -251,6 +301,7 @@ function MTR.DKPTouchLedger()
     st.playerCount = playerCount
     st.entryCount = entryCount
     st.lastMutationAt = time()
+    st.lastAppliedFrom = MTR.playerName or ""
     return st
 end
 
@@ -275,14 +326,19 @@ local function DecodeSnapshotPayload(raw)
             ledger[name] = { balance = tonumber(bal) or 0, history = {} }
             if histBlob and histBlob ~= "" then
                 for histRec in histBlob:gmatch("[^!]+") do
-                    local dt, amt, hbal, reason, officer =
-                        histRec:match("^([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)$")
+                    local dt, amt, hbal, reason, officer, txid =
+                        histRec:match("^([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)$")
+                    if not dt then
+                        dt, amt, hbal, reason, officer =
+                            histRec:match("^([^~]*)~([^~]*)~([^~]*)~([^~]*)~([^~]*)$")
+                    end
                     ledger[name].history[#ledger[name].history + 1] = {
                         date = dt or "",
                         amount = tonumber(amt) or 0,
                         balance = tonumber(hbal) or 0,
                         reason = reason or "",
                         officer = officer or "",
+                        txid = txid or "",
                     }
                 end
             end
@@ -314,6 +370,8 @@ local function ApplyFullSnapshot(ledger, senderName)
     local st = MTR.DKPTouchLedger()
     st.lastFullSyncAt = time()
     st.lastFullSyncFrom = senderName or ""
+    st.lastAppliedAt = st.lastFullSyncAt
+    st.lastAppliedFrom = senderName or ""
     return players, entries
 end
 
@@ -321,19 +379,26 @@ end
 local function DHEncodeEntry(playerName, entry)
     local reason = (entry.reason or ""):gsub("|", ""):gsub(",", "")
     if #reason > 60 then reason = reason:sub(1, 60) end
+    local txid = tostring(entry.txid or ""):gsub("|", ""):gsub(",", "")
+    if #txid > 80 then txid = txid:sub(1, 80) end
     return playerName
         .. "|" .. (entry.date    or "")
         .. "|" .. tostring(entry.amount  or 0)
         .. "|" .. tostring(entry.balance or 0)
         .. "|" .. reason
         .. "|" .. (entry.officer or "")
+        .. "|" .. txid
 end
 
 -- Decode a pipe-delimited token back into { playerName, entry }.
 -- Returns nil if the token is malformed.
 local function DHDecodeEntry(str)
-    local player, dt, amt, bal, reason, officer =
-        str:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]*)|([^|]*)$")
+    local player, dt, amt, bal, reason, officer, txid =
+        str:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]*)|([^|]*)|([^|]*)$")
+    if not player then
+        player, dt, amt, bal, reason, officer =
+            str:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]*)|([^|]*)$")
+    end
     if not player then return nil end
     return {
         playerName = player,
@@ -343,12 +408,15 @@ local function DHDecodeEntry(str)
             balance = tonumber(bal)  or 0,
             reason  = reason  or "",
             officer = officer or "",
+            txid    = txid or "",
         }
     }
 end
 
 -- Composite dedup key: same transaction from two syncs must not double-insert.
 local function DHKey(playerName, entry)
+    local txid = tostring(entry.txid or "")
+    if txid ~= "" then return "txid|" .. txid end
     return playerName .. "|" .. (entry.date or "") .. "|" .. tostring(entry.amount or 0)
 end
 
@@ -372,7 +440,7 @@ end
 -- Called by DKPSyncToRaidSafe after the balance broadcast.
 local function DHFlushQueue()
     if #dhQueue == 0 then return end
-    if not (MTR.isOfficer or MTR.isGM) then dhQueue = {} return end
+    if not (MTR.CanAccess and MTR.CanAccess("DKP")) then dhQueue = {} return end
     if not IsInGuild()    then dhQueue = {} return end
 
     if MTR.SendGuildScoped then MTR.SendGuildScoped(DH_PREFIX, "DH:S:" .. (MTR.playerName or "")) else SendAddonMessage(DH_PREFIX, "DH:S:" .. (MTR.playerName or ""), "GUILD") end
@@ -430,6 +498,7 @@ dhAddonFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
             end
         end
         if merged > 0 then
+            if MTR.DKPTouchLedger then MTR.DKPTouchLedger() end
             MTR.MP(string.format(
                 "[DKP History] Received %d new transaction(s) from %s.",
                 merged, dhRecvSender or "?"))
@@ -456,7 +525,7 @@ local syncBuf    = nil
 local syncSender = nil
 
 MTR.DKPSyncToRaidSafe = function()
-    if not (MTR.isOfficer or MTR.isGM) then return end
+    if not (MTR.CanAccess and MTR.CanAccess("DKP")) then return end
     if not IsInGuild()    then return end
 
     local standings = MTR.DKPStandings()
@@ -529,6 +598,7 @@ syncAddonFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
                 count = count + 1
             end
         end
+        if count > 0 and MTR.DKPTouchLedger then MTR.DKPTouchLedger() end
         MTR.MP(string.format("[DKP Sync] Received from %s — %d balance(s) updated.",
             syncSender or "?", count))
         syncBuf    = nil
@@ -553,6 +623,8 @@ local LS_PREFIX = "MekTownLS"
 if RegisterAddonMessagePrefix then RegisterAddonMessagePrefix(LS_PREFIX) end
 
 local lsRecv = nil
+local lsReqReplyAt = {}
+local lsConflictAt = {}
 local lsFrame = CreateFrame("Frame")
 lsFrame:RegisterEvent("CHAT_MSG_ADDON")
 
@@ -574,7 +646,8 @@ local function SendChunked(prefix, header, payload)
 end
 
 function MTR.DKPSendFullSnapshot(reason)
-    if not MTR.initialized or not MTR.db or not MTR.isOfficer or not IsInGuild() then return false end
+    if not MTR.initialized or not MTR.db or not IsInGuild() then return false end
+    if not (MTR.CanAccess and MTR.CanAccess("DKP")) then return false end
     local st = EnsureSyncStateFresh()
     local records, playerCount, entryCount = BuildSnapshotRecords()
     local payload = SnapshotPayloadFromRecords(records)
@@ -610,7 +683,10 @@ end
 function MTR.MaybeBroadcastSnapshot(reason)
     local st = EnsureSyncStateFresh()
     local now = time()
-    if not (MTR.isOfficer or MTR.isGM) then return end
+    if not (MTR.CanAccess and MTR.CanAccess("DKP")) then return end
+    if st.lastAppliedFrom and st.lastAppliedFrom ~= "" and st.lastAppliedFrom ~= (MTR.playerName or "") and (now - (st.lastFullSyncAt or 0) < 120) and reason ~= "manual" then
+        return
+    end
     if st.lastBroadcastRevision == st.revision and (now - (st.lastFullSyncAt or 0) < 30) then
         return
     end
@@ -630,9 +706,15 @@ lsFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
         local requester, peerHash = unpacked:match("^LS:REQ:([^:]+):(.+)$")
         requester = requester or senderName
         local st = EnsureSyncStateFresh()
-        if MTR.isOfficer and requester ~= (MTR.playerName or "") and (peerHash or "0") ~= (st.hash or "0") then
-            MTR.dprint("[DKP Snapshot] Responding to sync request from", requester)
-            MTR.DKPSendFullSnapshot("peer-request")
+        if (MTR.CanAccess and MTR.CanAccess("DKP")) and requester ~= (MTR.playerName or "") and (peerHash or "0") ~= (st.hash or "0") then
+            local key = tostring(requester or "?") .. "|" .. tostring(peerHash or "0")
+            local now = time()
+            local last = tonumber(lsReqReplyAt[key] or 0)
+            if (now - last) >= 20 then
+                lsReqReplyAt[key] = now
+                MTR.dprint("[DKP Snapshot] Responding to sync request from", requester)
+                MTR.DKPSendFullSnapshot("peer-request")
+            end
         end
 
     elseif unpacked:sub(1, 7) == "LS:MET:" then
@@ -651,6 +733,40 @@ lsFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
         lsRecv.chunks[#lsRecv.chunks + 1] = unpacked:sub(6)
 
     elseif unpacked == "LS:END" and lsRecv then
+        local localState = EnsureSyncStateFresh()
+        local localRev = tonumber(localState.revision) or 0
+        local incomingRev = tonumber(lsRecv.revision) or 0
+        if incomingRev < localRev then
+            MTR.dprint("[DKP Snapshot] Ignored stale snapshot from", lsRecv.sender or "?", "rev", incomingRev, "< local", localRev)
+            lsRecv = nil
+            return
+        end
+        if incomingRev == localRev and localState.hash and localState.hash ~= "0" and localState.hash ~= (lsRecv.hash or "0") then
+            local localEntries = tonumber(localState.entryCount or 0) or 0
+            local incomingEntries = tonumber(lsRecv.entryCount or 0) or 0
+            if incomingEntries <= localEntries then
+                localState.lastConflictAt = time()
+                localState.lastConflictFrom = lsRecv.sender or senderName or "?"
+                localState.lastConflictReason = "same-revision-hash-mismatch"
+                local ckey = table.concat({ tostring(lsRecv.sender or "?"), tostring(incomingRev), tostring(lsRecv.hash or "0"), tostring(localState.hash or "0") }, "|")
+                local now = time()
+                local last = tonumber(lsConflictAt[ckey] or 0)
+                if (now - last) >= 30 then
+                    lsConflictAt[ckey] = now
+                    if incomingEntries > 0 then
+                        MTR.MPE(string.format(
+                            "[DKP Snapshot] Conflict from %s: revision %d hash differs; keeping local (%d >= %d entries).",
+                            lsRecv.sender or "?", incomingRev, localEntries, incomingEntries))
+                    else
+                        MTR.dprint("[DKP Snapshot] Ignored weaker snapshot from", lsRecv.sender or "?", "rev", incomingRev, "entries", incomingEntries)
+                    end
+                end
+                lsRecv = nil
+                return
+            end
+            MTR.dprint("[DKP Snapshot] Same revision hash mismatch; accepting richer snapshot from", lsRecv.sender or "?", incomingEntries, ">", localEntries)
+        end
+
         local raw = table.concat(lsRecv.chunks, "")
         local receivedHash = MTR.Hash(raw)
         if receivedHash ~= (lsRecv.hash or "0") then

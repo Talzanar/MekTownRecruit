@@ -16,41 +16,188 @@ local MTR = MekTownRecruit
 local RH_PREFIX = "MekTownRH"
 if RegisterAddonMessagePrefix then RegisterAddonMessagePrefix(RH_PREFIX) end
 
-local function RHBroadcast(recruit, sentBy, timestamp)
-    local msg = "RECRUIT_INV:" .. recruit .. "|" .. sentBy .. "|" .. timestamp
-    -- Send to GUILD so all online officers receive it regardless of raid status
-    if IsInGuild() then
-        if MTR.SendGuildScoped then MTR.SendGuildScoped(RH_PREFIX, msg) else SendAddonMessage(RH_PREFIX, msg, "GUILD") end
-    end
+local function RHSanitize(s)
+    s = tostring(s or "")
+    s = s:gsub("[|,;]", " ")
+    s = s:gsub("[%c]", " ")
+    return s
 end
 
-local function RHMerge(recruit, sentBy, timestamp)
+local function RHState()
+    local gs = MTR.GetGuildStore and MTR.GetGuildStore(true) or nil
+    if not gs then return { revision = 0, hash = "0", lastSyncAt = 0 } end
+    gs.syncState = gs.syncState or {}
+    gs.syncState.recruit = gs.syncState.recruit or { revision = 0, hash = "0", lastSyncAt = 0, lastAckByPeer = {} }
+    return gs.syncState.recruit
+end
+
+local function RHMakeId(recruit, sentBy, timestamp)
+    local seed = table.concat({ tostring(recruit or ""), tostring(sentBy or ""), tostring(timestamp or ""), tostring(MTR.playerName or "?") }, "|")
+    return (MTR.Hash and MTR.Hash(seed)) or seed
+end
+
+local function RHRehash()
+    local hist = (MTR.GetGuildStore and MTR.GetGuildStore(true).recruitHistory) or MTR.db.recruitHistory or {}
+    local parts = {}
+    for i, e in ipairs(hist) do
+        parts[i] = table.concat({ RHSanitize(e.recruit), RHSanitize(e.sentBy), RHSanitize(e.time), RHSanitize(e.id or "") }, "|")
+    end
+    local st = RHState()
+    st.hash = (MTR.Hash and MTR.Hash(table.concat(parts, ";"))) or tostring(#parts)
+    st.revision = tonumber(st.revision or 0) + 1
+    st.lastSyncAt = time()
+    return st
+end
+
+local function RHBuildChunks()
+    local hist = (MTR.GetGuildStore and MTR.GetGuildStore(true).recruitHistory) or MTR.db.recruitHistory or {}
+    local chunks, chunk = {}, ""
+    for _, e in ipairs(hist) do
+        local token = table.concat({ RHSanitize(e.recruit), RHSanitize(e.sentBy), RHSanitize(e.time), RHSanitize(e.id or "") }, "|")
+        if #chunk + #token + 1 > 200 then
+            if chunk ~= "" then chunks[#chunks + 1] = chunk end
+            chunk = token
+        else
+            chunk = (chunk == "" and token) or (chunk .. ";" .. token)
+        end
+    end
+    if chunk ~= "" then chunks[#chunks + 1] = chunk end
+    return chunks, #hist
+end
+
+local function RHSend(msg)
+    if not IsInGuild() then return false end
+    if MTR.SendGuildScoped then return MTR.SendGuildScoped(RH_PREFIX, msg) end
+    SendAddonMessage(RH_PREFIX, msg, "GUILD")
+    return true
+end
+
+local function RHBroadcast(recruit, sentBy, timestamp)
+    local rid = RHMakeId(recruit, sentBy, timestamp)
+    local msg = "RECRUIT_INV:" .. recruit .. "|" .. sentBy .. "|" .. timestamp .. "|" .. rid
+    -- Send to GUILD so all online officers receive it regardless of raid status
+    RHSend(msg)
+end
+
+local function RHMerge(recruit, sentBy, timestamp, rid)
     if not MTR.db then return end
     -- Avoid duplicates: skip if exact same recruit+sentBy+time already stored
     local hist = (MTR.GetGuildStore and MTR.GetGuildStore(true).recruitHistory) or MTR.db.recruitHistory
+    rid = rid and tostring(rid) or ""
     for _, e in ipairs(hist) do
+        if rid ~= "" and e.id and e.id == rid then
+            return
+        end
         if e.recruit == recruit and e.sentBy == sentBy and e.time == timestamp then
             return
         end
     end
-    table.insert(hist, { recruit=recruit, sentBy=sentBy, time=timestamp })
+    table.insert(hist, { recruit=recruit, sentBy=sentBy, time=timestamp, id=(rid ~= "" and rid or RHMakeId(recruit, sentBy, timestamp)) })
     if MTR.AppendGuildEvent then MTR.AppendGuildEvent("recruit", "contact", table.concat({recruit or "", sentBy or "", timestamp or ""}, "|")) end
     -- Keep newest at end; cap at 500 entries
     if #hist > 500 then tremove(hist, 1) end
+    RHRehash()
+end
+
+local function RHSendSnapshot(reason)
+    if not (MTR.isOfficer or MTR.isGM) then return false end
+    local st = RHState()
+    local chunks, count = RHBuildChunks()
+    local payloadRaw = table.concat(chunks, ";")
+    local payloadHash = (MTR.Hash and MTR.Hash(payloadRaw)) or tostring(#payloadRaw)
+    st.hash = payloadHash
+    st.lastBroadcastAt = time()
+    st.lastBroadcastReason = reason or "sync"
+    RHSend(string.format("RH:MET:%s:%s:%d", tostring(st.revision or 0), tostring(payloadHash), count or 0))
+    for _, c in ipairs(chunks) do RHSend("RH:D:" .. c) end
+    if #chunks == 0 then RHSend("RH:D:") end
+    RHSend("RH:END:" .. RHSanitize(reason or "sync"))
+    return true
 end
 
 local rhFrame = CreateFrame("Frame")
 rhFrame:RegisterEvent("CHAT_MSG_ADDON")
+local rhRecv = nil
 rhFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
     if prefix ~= RH_PREFIX then return end
     if not MTR.initialized or not MTR.db then return end
+    local unpacked, senderName = (MTR.UnpackGuildScoped and MTR.UnpackGuildScoped(message, sender, false)) or message, ((sender or ""):match("^([^%-]+)") or sender or "")
+    if not unpacked then return end
     -- Ignore our own broadcast (we already inserted locally).
     -- sender arrives as "Name-Realm" on Ascension; strip realm before comparing.
-    local senderName = (sender or ""):match("^([^%-]+)") or sender or ""
     if senderName == MTR.playerName then return end
-    local recruit, sentBy, timestamp = message:match("^RECRUIT_INV:([^|]+)|([^|]+)|(.+)$")
+
+    if unpacked:sub(1, 7) == "RH:REQ:" then
+        local _, knownHash = unpacked:match("^RH:REQ:([^:]*):?(.*)$")
+        if knownHash and knownHash ~= "" then
+            local st = RHState()
+            if tostring(knownHash) == tostring(st.hash or "0") then return end
+        end
+        if MTR.isOfficer or MTR.isGM then RHSendSnapshot("peer-request") end
+        return
+    elseif unpacked:sub(1, 7) == "RH:MET:" then
+        if MTR.IsGuildOfficerName and not MTR.IsGuildOfficerName(senderName) then return end
+        local rev, hash = unpacked:match("^RH:MET:([^:]+):([^:]+):")
+        rhRecv = { rev = tonumber(rev) or 0, hash = hash or "0", chunks = {}, from = senderName }
+        return
+    elseif unpacked:sub(1, 5) == "RH:D:" and rhRecv then
+        rhRecv.chunks[#rhRecv.chunks + 1] = unpacked:sub(6)
+        return
+    elseif unpacked:sub(1, 7) == "RH:END:" and rhRecv then
+        local st = RHState()
+        if tonumber(rhRecv.rev or 0) < tonumber(st.revision or 0) then rhRecv = nil return end
+        local merged = 0
+        for _, chunk in ipairs(rhRecv.chunks) do
+            for token in tostring(chunk or ""):gmatch("[^;]+") do
+                local recruit, sentBy, timestamp = token:match("^([^|]+)|([^|]+)|(.+)$")
+                local rid
+                if not recruit then
+                    recruit, sentBy, timestamp, rid = token:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+                else
+                    local r2, s2, t2, id2 = token:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+                    if r2 and s2 and t2 and id2 then recruit, sentBy, timestamp, rid = r2, s2, t2, id2 end
+                end
+                if recruit and sentBy and timestamp then
+                    local before = #(((MTR.GetGuildStore and MTR.GetGuildStore(true).recruitHistory) or MTR.db.recruitHistory) or {})
+                    RHMerge(recruit, sentBy, timestamp, rid)
+                    local after = #(((MTR.GetGuildStore and MTR.GetGuildStore(true).recruitHistory) or MTR.db.recruitHistory) or {})
+                    if after > before then merged = merged + 1 end
+                end
+            end
+        end
+        local localChunks = table.concat(rhRecv.chunks, ";")
+        local localHash = (MTR.Hash and MTR.Hash(localChunks)) or tostring(#localChunks)
+        if localHash ~= tostring(rhRecv.hash or "") and #rhRecv.chunks > 0 then
+            local stc = RHState()
+            stc.lastConflictAt = time()
+            stc.lastConflictFrom = tostring(rhRecv.from or "?")
+            stc.lastConflictReason = "hash-mismatch"
+            MTR.MPE("[Recruit Sync] Hash mismatch from " .. tostring(rhRecv.from or "?") .. "; keeping local state.")
+        else
+            local st2 = RHState()
+            st2.revision = math.max(tonumber(st2.revision or 0), tonumber(rhRecv.rev or 0))
+            st2.hash = tostring(rhRecv.hash or st2.hash or "0")
+            st2.lastSyncAt = time()
+            RHSend(string.format("RH:ACK:%s:%s:%d", RHSanitize(MTR.playerName or "?"), tostring(st2.hash or "0"), tonumber(st2.revision or 0)))
+        end
+        rhRecv = nil
+        return
+    elseif unpacked:sub(1, 7) == "RH:ACK:" then
+        if MTR.IsGuildOfficerName and not MTR.IsGuildOfficerName(senderName) then return end
+        local peer, hash, rev = unpacked:match("^RH:ACK:([^:]+):([^:]+):([^:]+)$")
+        local st = RHState()
+        if tostring(hash or "") == tostring(st.hash or "0") then
+            st.lastAckByPeer = st.lastAckByPeer or {}
+            st.lastAckByPeer[peer or senderName or "?"] = { revision = tonumber(rev) or 0, at = time() }
+        end
+        return
+    end
+
+    if MTR.IsGuildOfficerName and not MTR.IsGuildOfficerName(senderName) then return end
+    local recruit, sentBy, timestamp, rid = unpacked:match("^RECRUIT_INV:([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+    if not recruit then recruit, sentBy, timestamp = unpacked:match("^RECRUIT_INV:([^|]+)|([^|]+)|(.+)$") end
     if recruit and sentBy and timestamp then
-        RHMerge(recruit, sentBy, timestamp)
+        RHMerge(recruit, sentBy, timestamp, rid)
         -- Suppress further popups on our client for this recruit now that
         -- another officer has already acted. Uses ignoreDuration so the
         -- recruit won't trigger a new popup on any officer's screen.
@@ -58,6 +205,16 @@ rhFrame:SetScript("OnEvent", function(_, _, prefix, message, _, sender)
             MTR.recent[recruit] = GetTime()
         end
     end
+end)
+
+local rhInit = CreateFrame("Frame")
+rhInit:RegisterEvent("PLAYER_LOGIN")
+rhInit:SetScript("OnEvent", function()
+    MTR.After(12, function()
+        if not IsInGuild() then return end
+        local st = RHState()
+        RHSend("RH:REQ:" .. RHSanitize(MTR.playerName or "?") .. ":" .. tostring(st.hash or "0"))
+    end)
 end)
 
 -- ============================================================================
@@ -102,7 +259,7 @@ function MTR.ShowRecruitPopup(sender, message)
     MTR.dprint("Popup for", sender)
 
     -- Try to gather target info: if sender is in range and targetable, inspect them
-    local level, class, race, guild = "?", "?", "?", nil
+    local level, class, race = "?", "?", "?"
     -- SetTarget is not available but we can check if the player is in our party/raid
     for i = 1, GetNumRaidMembers() do
         local n,_,_,lv,_,c,_,_,_,r = GetRaidRosterInfo(i)

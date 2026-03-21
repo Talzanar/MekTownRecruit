@@ -10,6 +10,84 @@
 local MTR = MekTownRecruit
 
 -- ============================================================================
+-- UI BOUNDS VALIDATION HELPERS (debug guardrails)
+-- ============================================================================
+local function _rect(o)
+    if not o or not o.GetLeft then return nil end
+    local l, r, t, b = o:GetLeft(), o:GetRight(), o:GetTop(), o:GetBottom()
+    if not l or not r or not t or not b then return nil end
+    return l, r, t, b
+end
+
+local function _isVisible(o)
+    if not o then return false end
+    if o.IsVisible then return o:IsVisible() end
+    return true
+end
+
+function MTR.ValidateFrameBounds(root, tag, padding)
+    if not root then return 0 end
+    local rl, rr, rt, rb = _rect(root)
+    if not rl then return 0 end
+
+    local pad = tonumber(padding) or 0
+    rl = rl + pad
+    rr = rr - pad
+    rt = rt - pad
+    rb = rb + pad
+
+    local issues = 0
+    local function check(obj)
+        if not _isVisible(obj) then return end
+        local l, r, t, b = _rect(obj)
+        if not l then return end
+        if l < rl or r > rr or t > rt or b < rb then
+            issues = issues + 1
+        end
+    end
+
+    local visited = 0
+    local limit = 3000
+    local function walk(frame)
+        if not frame or visited >= limit then return end
+        visited = visited + 1
+        check(frame)
+        for _, region in ipairs({ frame:GetRegions() }) do
+            check(region)
+        end
+        for _, child in ipairs({ frame:GetChildren() }) do
+            walk(child)
+        end
+    end
+
+    walk(root)
+
+    if issues > 0 then
+        local where = tag or (root.GetName and root:GetName()) or "<frame>"
+        if MTR.dprint then
+            MTR.dprint("[UI Bounds]", where, "out-of-bounds elements:", issues)
+        elseif DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff4444[MTR UI Bounds]|r " .. tostring(where) .. " has " .. tostring(issues) .. " out-of-bounds element(s).")
+        end
+    end
+    return issues
+end
+
+function MTR.ScheduleBoundsValidation(root, tag, padding, delay)
+    if not root or not MTR.ValidateFrameBounds then return end
+    local function run()
+        if root and root.IsShown and root:IsShown() then
+            MTR.ValidateFrameBounds(root, tag, padding)
+        end
+    end
+    if MTR.After then
+        MTR.After(delay or 0.05, run)
+    else
+        run()
+    end
+end
+
+-- ============================================================================
 -- LOCK DISPLAY  (safe for 3.3.5a – no SetMaxLines call)
 -- ============================================================================
 function MTR.LockDisplay(fs, pixelWidth)
