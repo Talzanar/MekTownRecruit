@@ -1,10 +1,18 @@
 # MekTown Recruit
 
-The official guild suite for MekTown Choppaz on WoW Ascension (Area 52), designed to make running a massive, active guild a bit easier for everyone.
+<img width="500" alt="MTR Cover" src="https://github.com/user-attachments/assets/b835e5d3-df79-450f-a4fb-2234559eb538" />
 
-MekTown Recruit packs all our core guild operations—recruiting, DKP tracking, attendance, guild bank ledgers, and group-finder tools—into one unified addon. Instead of wrestling with a dozen different addons and Google Sheets, officers and members can see everything in one place.
+The ultimate utility and guild management tool, originally built for MekTown Choppaz on WoW Ascension (Area 52). I designed this addon to make running a massive, active guild a bit easier for everyone.
 
-<img width="1024" height="1536" alt="MTR" src="https://github.com/user-attachments/assets/814b659b-cc70-4102-91fd-6709ab58a32b" />
+MekTown Recruit packs all the core guild operations—recruiting, DKP tracking, attendance, guild bank ledgers, and group-finder tools—into one unified addon. Instead of wrestling with a dozen different addons and Google Sheets, officers and members can see everything in one place.
+
+<img width="1024" height="1536" alt="MTR UI" src="https://github.com/user-attachments/assets/814b659b-cc70-4102-91fd-6709ab58a32b" />
+
+## Support the Project
+
+I built this project entirely solo to help the Ascension community manage their guilds better. If you love using MekTown Recruit and want to support my work, you can buy me a coffee here:
+
+**[Donate via PayPal](https://paypal.me/talzanar)**
 
 ## Addon Info
 
@@ -70,7 +78,7 @@ Since we're on a 3.3.5a client (Ascension), you install this exactly like any cl
 
 ## How Permissions Work
 
-We built this so tabs are visible to everyone, but buttons that actually change guild data are restricted.
+I built this so tabs are visible to everyone, but buttons that actually change guild data are restricted.
 
 **Officers & Guild Master:**
 Can use the Recruit scanner, modify DKP, run Loot/Auctions, perform inactivity kicks, and manually force sync repairs.
@@ -80,7 +88,7 @@ Can view the Guild Tree, DKP Standings, Character Vault, Guild Bank Ledger, and 
 
 ## The Guild Bank Ledger
 
-Because the default 3.3.5 bank log is notoriously short and easily wiped, our addon keeps a permanent, synced ledger of both items and gold. 
+Because the default 3.3.5 bank log is notoriously short and easily wiped, my addon keeps a permanent, synced ledger of both items and gold. 
 
 - It deduplicates transactions automatically so multiple officers scanning doesn't create duplicate entries.
 - It displays exact dates when the game provides them, and smartly calculates "days ago" when it doesn't.
@@ -88,7 +96,7 @@ Because the default 3.3.5 bank log is notoriously short and easily wiped, our ad
 
 ## Under the Hood
 
-The codebase is built strictly for the 3.3.5a engine limits. We don't use retail `C_Timer` mixins, and all heavy sync operations are chunked to respect legacy 255-byte chat limits.
+The codebase is built strictly for the 3.3.5a engine limits. I don't use retail `C_Timer` mixins, and all heavy sync operations are chunked to respect legacy 255-byte chat limits.
 
 ```text
 MekTownRecruit/
@@ -100,6 +108,6 @@ MekTownRecruit/
 
 ## Credits
 
-Massive thanks to the MekTown Choppaz guild officers and testers for breaking this repeatedly until it worked, and to the Ascension UI dev community for the 3.3.5a workarounds.
+Massive thanks to the MekTown Choppaz guild officers and testers for breaking this repeatedly until I got it working perfectly, and to the Ascension UI dev community for the 3.3.5a workarounds.
 
 *FOR GORK N MORK!*
